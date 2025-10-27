@@ -65,6 +65,7 @@ app = FastAPI(
 # CORS configuration for production
 origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "https://smart-travel-assistant-946f9.web.app",
     "https://smart-travel-assistant-946f9.firebaseapp.com",
     # Allow Vercel frontend domains
@@ -76,12 +77,10 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    # Allow Vercel domains
-    allow_origin_regex=r"https://.*\.vercel\.app",
 )
 
 
