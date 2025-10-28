@@ -5,7 +5,7 @@ AI-powered travel planning assistant with interactive flight dashboard, price an
 ## 🚀 **ONE-COMMAND START**
 
 ```bash
-cd /Users/edwinordonez/Capstone/capstone_sta
+cd D:\STA\my-project
 ./start.sh
 ```
 
@@ -13,7 +13,7 @@ cd /Users/edwinordonez/Capstone/capstone_sta
 
 ## 🎯 **What You Get**
 
-- 🤖 **AI Chat Interface** - Intelligent travel planning
+- 🤖 **AI Chat Interface** - Intelligent travel planning with location detection
 - 🗺️ **Flight Tracker Dashboard** - Ask about flights to see:
   - **Animated Flight Map** - Moving airplane with real-time progress
   - **Professional Price Charts** - Interactive line charts using Recharts
@@ -28,6 +28,7 @@ In the chat, try:
 - "Show me ticket prices"
 - "Compare flight prices from NYC to LA"
 - "Search for flights to Tokyo"
+- "Book a flight to Barcelona"
 
 ## 📋 **Prerequisites**
 - Node.js 18+ (use `nvm use 18` if needed)
@@ -67,7 +68,7 @@ cd build && python3 -m http.server 3000
 
 ### Core Features
 - AI-powered travel recommendations
-- Real-time flight data integration
+- Real-time flight data integration (via Amadeus API)
 - Location detection and personalization
 - Multi-destination trip planning
 - Price comparison and optimization
@@ -107,6 +108,19 @@ The backend is deployed and running at:
 https://capstone-79wenhjg2-berkes-projects-f48a9605.vercel.app
 ```
 
+### Backend Features
+- **FastAPI** - Modern Python web framework
+- **OpenAI Integration** - GPT-4 powered chat responses
+- **Amadeus API Integration** - Real-time flight data
+- **Intent Detection** - Smart message analysis
+- **Caching System** - Optimized API usage
+- **Location Services** - User location detection
+
+### API Endpoints
+- `GET /api/health` - Health check
+- `POST /api/chat` - Main chat endpoint
+- `GET /api/diag/amadeus/*` - Diagnostic endpoints
+
 ## 🧪 Testing
 
 1. **Home Page**: Modern landing page with feature overview
@@ -141,12 +155,74 @@ The app is ready for deployment to any static hosting service:
 - Enhanced chat interface with split-view
 - Improved UI/UX design
 - Added responsive layout
+- Integrated Amadeus API for real-time data
 
 ### v1.0.0
 - Basic chat interface
 - AI travel recommendations
 - Backend API integration
 
+## 🔧 Technical Stack
+
+### Frontend
+- **React 18.2.0** - Main framework
+- **Recharts 3.3.0** - Professional chart library
+- **Custom CSS** - Wayfinder design system
+- **Responsive Design** - Mobile-first approach
+
+### Backend
+- **Python 3.11+** - Backend language
+- **FastAPI** - Web framework
+- **OpenAI API** - AI chat responses
+- **Amadeus API** - Travel data integration
+- **Pydantic** - Data validation
+- **Uvicorn** - ASGI server
+
+## 🎨 Design System
+
+### Wayfinder Brand Colors
+- **Primary**: `#004C8C` (Wayfinder blue)
+- **Accent**: `#00ADEF` (Wayfinder light blue)
+- **Background**: `#EAF9FF` (Wayfinder light background)
+- **Chart Colors**: Orange and blue variants
+
+### Components
+- **Cards**: Clean white cards with subtle borders
+- **Badges**: Rounded badges with proper color variants
+- **Tables**: Professional table design with hover effects
+- **Charts**: Smooth Recharts integration with Wayfinder colors
+
+## 🚨 Troubleshooting
+
+### Dashboard Not Appearing
+1. Use keywords: "flight", "price", "ticket", "booking"
+2. Check browser console (F12) for errors
+3. Restart: `./start.sh`
+
+### Server Won't Start
+```bash
+pkill -f "python3 -m http.server"
+./start.sh
+```
+
+### Build Errors
+```bash
+rm -rf node_modules package-lock.json
+npm install
+npm run build
+```
+
+## 📚 Documentation
+
+- `QUICK_START.md` - One-page quick start guide
+- `CURRENT_STATE.md` - Current project status
+- `SUMMARY.md` - Complete project summary
+- `backend/AMADEUS_INTEGRATION.md` - API integration details
+
 ---
 
-**Built with React, Tailwind CSS, and modern web technologies.**
+**Built with React, FastAPI, and modern web technologies.**
+
+**Last Updated:** January 2025  
+**Version:** 2.0.0  
+**Status:** ✅ Complete & Working

@@ -473,6 +473,42 @@ export default function Chat({ onShowDashboard, showDashboard, dashboardData, on
     return shouldShow;
   };
 
+  // Function to handle dashboard data processing
+  const handleDashboardData = (data) => {
+    console.log('Processing dashboard data:', data);
+    
+    // Check if we have real flight data
+    if (data.dashboard_data && data.dashboard_data.hasRealData) {
+      // Use real Amadeus data
+      console.log('Using real flight data from API');
+      onShowDashboard(data.dashboard_data);
+    } else if (data.flights && data.flights.length > 0) {
+      // Legacy format - convert to new format
+      console.log('Converting legacy format to new format');
+      const dashboardData = {
+        hasRealData: true,
+        route: data.route || {},
+        outboundFlights: data.flights,
+        returnFlights: [],
+        priceData: data.priceData || []
+      };
+      onShowDashboard(dashboardData);
+    } else {
+      // No real data - show mock dashboard
+      console.log('Using fallback mock data');
+      onShowDashboard({
+        hasRealData: false,
+        route: {
+          departure: 'Washington DC',
+          destination: 'Istanbul',
+          departureCode: 'IAD',
+          destinationCode: 'IST',
+          date: new Date().toLocaleDateString()
+        }
+      });
+    }
+  };
+
   const handleSend = async (text) => {
     const userMsg = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) };
     setMessages((prev) => [...prev, userMsg]);
@@ -490,75 +526,7 @@ export default function Chat({ onShowDashboard, showDashboard, dashboardData, on
           if (shouldShowDashboard(text) && onShowDashboard) {
             console.log('Triggering dashboard for text:', text);
             console.log('API Response data:', data);
-            console.log('data.data_fetched:', data.data_fetched);
-            console.log('data.amadeus_data:', data.amadeus_data);
-            
-            // Check if the API response contains flight data
-            if (data.data_fetched && data.amadeus_data) {
-              console.log('Using real flight data from API');
-              console.log('Passing to dashboard:', data.amadeus_data);
-              console.log('Route data being passed:', data.amadeus_data.route);
-              onShowDashboard(data.amadeus_data);
-            } else {
-              console.log('Using fallback mock data');
-              console.log('data_fetched:', data.data_fetched);
-              console.log('amadeus_data exists:', !!data.amadeus_data);
-              
-              // Extract dates and cities from user message
-              const { departureDate, returnDate } = extractDatesFromMessage(text);
-              const { origin, destination } = extractCitiesFromMessage(text);
-              console.log('Extracted dates:', { departureDate, returnDate });
-              console.log('Extracted cities:', { origin, destination });
-              
-              // Fallback to mock data if no real data available
-              const basePrice = Math.floor(Math.random() * 200) + 300;
-              
-              // Use extracted departure date or fallback to current date
-              const startDate = departureDate || new Date();
-              const dynamicPriceData = Array.from({ length: 7 }, (_, i) => {
-                const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
-                return {
-                  date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-                  price: basePrice + Math.floor(Math.random() * 100) - 50,
-                  optimal: basePrice - 20
-                };
-              });
-
-              const airlines = ['Delta Airlines', 'United Airlines', 'American Airlines', 'Southwest Airlines', 'JetBlue Airways', 'Spirit Airlines'];
-              const dynamicFlightsData = airlines.slice(0, 4).map((airline, index) => ({
-                id: (index + 1).toString(),
-                airline: airline,
-                flightNumber: `${airline.split(' ')[0].substring(0, 2).toUpperCase()} ${Math.floor(Math.random() * 9000) + 1000}`,
-                departure: `${6 + index * 2}:${index % 2 === 0 ? '00' : '30'} AM`,
-                arrival: `${9 + index * 2}:${index % 2 === 0 ? '30' : '00'} AM`,
-                duration: `${3 + Math.floor(Math.random() * 2)}h ${Math.floor(Math.random() * 60)}m`,
-                price: basePrice + Math.floor(Math.random() * 100) - 50,
-                isOptimal: index === 0,
-                stops: Math.floor(Math.random() * 2)
-              }));
-
-              // Format dates for display
-              const departureDisplay = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-              const returnDisplay = returnDate ? returnDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null;
-
-              // Use extracted cities or fallback to defaults
-              const routeInfo = {
-                departure: origin?.name || 'New York',
-                destination: destination?.name || 'Barcelona',
-                departureCode: origin?.code || 'JFK',
-                destinationCode: destination?.code || 'BCN',
-                date: departureDisplay,
-                departure_display: departureDisplay,
-                return_display: returnDisplay
-              };
-
-              onShowDashboard({
-                route: routeInfo,
-                flights: dynamicFlightsData,
-                priceData: dynamicPriceData,
-                hasRealData: false
-              });
-            }
+            handleDashboardData(data);
           }
         } catch (e) {
           console.error('API Error:', e);

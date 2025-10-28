@@ -335,3 +335,37 @@ Return only the JSON object, no other text."""
                 "params": {},
                 "has_required_params": False
             }
+    
+    def _parse_date_range(self, message: str) -> tuple:
+        """Parse date ranges like '10/27 to 11/5' or 'October 27th to November 5th'"""
+        import re
+        from datetime import datetime, timedelta
+        
+        # Current year
+        current_year = datetime.now().year
+        
+        # Pattern for MM/DD format
+        date_pattern = r'(\d{1,2})/(\d{1,2})'
+        dates = re.findall(date_pattern, message)
+        
+        if len(dates) >= 2:
+            # Parse departure date
+            dep_month, dep_day = int(dates[0][0]), int(dates[0][1])
+            departure_date = datetime(current_year, dep_month, dep_day)
+            
+            # Parse return date  
+            ret_month, ret_day = int(dates[1][0]), int(dates[1][1])
+            return_date = datetime(current_year, ret_month, ret_day)
+            
+            # Handle year rollover if return date is before departure
+            if return_date < departure_date:
+                return_date = datetime(current_year + 1, ret_month, ret_day)
+            
+            return (
+                departure_date.strftime("%Y-%m-%d"),
+                return_date.strftime("%Y-%m-%d")
+            )
+        
+        # Default: 30 days from now
+        departure_date = datetime.now() + timedelta(days=30)
+        return (departure_date.strftime("%Y-%m-%d"), None)

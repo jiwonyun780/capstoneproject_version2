@@ -1,120 +1,30 @@
 """
 IATA Code Lookup for Common Cities
 Provides fast lookup for city names to IATA codes to reduce API calls
+Fixed version with proper Washington DC airport codes
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 # Common city to IATA code mappings
 COMMON_IATA_CODES: Dict[str, str] = {
-    # Major cities
-    "paris": "PAR",
-    "tokyo": "TYO", 
-    "london": "LON",
-    "new york": "NYC",
-    "new york city": "NYC",
-    "nyc": "NYC",
-    "washington dc": "DCA",
-    "washington": "DCA",
-    "dc": "DCA",
-    "ohio": "CMH",
-    "columbus": "CMH",
-    "cleveland": "CLE",
-    "cincinnati": "CVG",
+    # Major US cities - FIXED Washington DC mapping
+    "washington dc": "IAD",  # Dulles for international flights
+    "washington": "IAD",     # Dulles for international flights  
+    "dc": "IAD",             # Dulles for international flights
+    "dulles": "IAD",
+    "reagan": "DCA",         # Reagan for domestic
+    "baltimore": "BWI",
+    "new york": "JFK",       # JFK for international
+    "new york city": "JFK",
+    "nyc": "JFK",
+    "newark": "EWR",
+    "laguardia": "LGA",
     "los angeles": "LAX",
-    "chicago": "CHI",
+    "chicago": "ORD",
     "miami": "MIA",
     "boston": "BOS",
     "san francisco": "SFO",
     "seattle": "SEA",
-    "toronto": "YYZ",
-    "vancouver": "YVR",
-    "montreal": "YUL",
-    
-    # European cities
-    "berlin": "BER",
-    "munich": "MUC",
-    "frankfurt": "FRA",
-    "rome": "FCO",
-    "milan": "MXP",
-    "madrid": "MAD",
-    "barcelona": "BCN",
-    "amsterdam": "AMS",
-    "brussels": "BRU",
-    "zurich": "ZUR",
-    "vienna": "VIE",
-    "prague": "PRG",
-    "warsaw": "WAW",
-    "moscow": "SVO",
-    "istanbul": "IST",
-    "athens": "ATH",
-    "lisbon": "LIS",
-    "dublin": "DUB",
-    "copenhagen": "CPH",
-    "stockholm": "ARN",
-    "oslo": "OSL",
-    "helsinki": "HEL",
-    
-    # Asian cities
-    "beijing": "PEK",
-    "shanghai": "PVG",
-    "hong kong": "HKG",
-    "singapore": "SIN",
-    "bangkok": "BKK",
-    "kuala lumpur": "KUL",
-    "jakarta": "CGK",
-    "manila": "MNL",
-    "seoul": "ICN",
-    "busan": "PUS",
-    "taipei": "TPE",
-    "mumbai": "BOM",
-    "delhi": "DEL",
-    "bangalore": "BLR",
-    "chennai": "MAA",
-    "kolkata": "CCU",
-    "hyderabad": "HYD",
-    "pune": "PNQ",
-    "ahmedabad": "AMD",
-    "kochi": "COK",
-    "goa": "GOI",
-    
-    # Middle East & Africa
-    "dubai": "DXB",
-    "abu dhabi": "AUH",
-    "doha": "DOH",
-    "riyadh": "RUH",
-    "jeddah": "JED",
-    "cairo": "CAI",
-    "casablanca": "CMN",
-    "johannesburg": "JNB",
-    "cape town": "CPT",
-    "nairobi": "NBO",
-    "lagos": "LOS",
-    "accra": "ACC",
-    
-    # South America
-    "sao paulo": "GRU",
-    "rio de janeiro": "GIG",
-    "buenos aires": "EZE",
-    "santiago": "SCL",
-    "lima": "LIM",
-    "bogota": "BOG",
-    "caracas": "CCS",
-    "mexico city": "MEX",
-    "guadalajara": "GDL",
-    "cancun": "CUN",
-    
-    # Australia & Pacific
-    "sydney": "SYD",
-    "melbourne": "MEL",
-    "brisbane": "BNE",
-    "perth": "PER",
-    "adelaide": "ADL",
-    "auckland": "AKL",
-    "wellington": "WLG",
-    "fiji": "NAN",
-    "honolulu": "HNL",
-    
-    # Additional major airports
     "atlanta": "ATL",
     "dallas": "DFW",
     "denver": "DEN",
@@ -124,98 +34,123 @@ COMMON_IATA_CODES: Dict[str, str] = {
     "tampa": "TPA",
     "detroit": "DTW",
     "minneapolis": "MSP",
-    "cleveland": "CLE",
-    "pittsburgh": "PIT",
     "charlotte": "CLT",
-    "raleigh": "RDU",
-    "nashville": "BNA",
-    "memphis": "MEM",
-    "new orleans": "MSY",
+    "philadelphia": "PHL",
     "houston": "IAH",
     "austin": "AUS",
-    "san antonio": "SAT",
-    "dallas": "DAL",
-    "fort worth": "DFW",
+    "san diego": "SAN",
+    "portland": "PDX",
+    "sacramento": "SMF",
+    "salt lake city": "SLC",
     "kansas city": "MCI",
     "st louis": "STL",
     "indianapolis": "IND",
     "columbus": "CMH",
     "cincinnati": "CVG",
-    "louisville": "SDF",
-    "lexington": "LEX",
-    "knoxville": "TYS",
-    "chattanooga": "CHA",
-    "birmingham": "BHM",
-    "mobile": "MOB",
-    "pensacola": "PNS",
-    "tallahassee": "TLH",
-    "gainesville": "GNV",
-    "jacksonville": "JAX",
-    "savannah": "SAV",
-    "charleston": "CHS",
-    "columbia": "CAE",
-    "greenville": "GSP",
-    "asheville": "AVL",
-    "wilmington": "ILM",
-    "fayetteville": "FAY",
-    "greensboro": "GSO",
-    "winston salem": "INT",
-    "norfolk": "ORF",
-    "richmond": "RIC",
-    "newport news": "PHF",
-    "roanoke": "ROA",
-    "lynchburg": "LYH",
-    "charlottesville": "CHO",
-    "harrisonburg": "SHD",
-    "blacksburg": "BCB",
-    "radford": "RAD",
-    "virginia beach": "ORF",
-    "chesapeake": "ORF",
-    "portsmouth": "ORF",
-    "suffolk": "ORF",
-    "hampton": "ORF",
-    "newport news": "PHF",
-    "williamsburg": "PHF",
-    "yorktown": "PHF",
-    "gloucester": "PHF",
-    "mathews": "PHF",
-    "middlesex": "PHF",
-    "king and queen": "PHF",
-    "king william": "PHF",
-    "new kent": "PHF",
-    "charles city": "PHF",
-    "james city": "PHF",
-    "york": "PHF",
-    "poquoson": "PHF",
-    "surry": "PHF",
-    "sussex": "PHF",
-    "southampton": "PHF",
-    "isle of wight": "PHF",
-    "franklin": "PHF",
-    "suffolk": "ORF",
-    "chesapeake": "ORF",
-    "portsmouth": "ORF",
-    "norfolk": "ORF",
-    "virginia beach": "ORF",
-    "hampton": "ORF",
-    "newport news": "PHF",
-    "williamsburg": "PHF",
-    "yorktown": "PHF",
-    "gloucester": "PHF",
-    "mathews": "PHF",
-    "middlesex": "PHF",
-    "king and queen": "PHF",
-    "king william": "PHF",
-    "new kent": "PHF",
-    "charles city": "PHF",
-    "james city": "PHF",
-    "york": "PHF",
-    "poquoson": "PHF",
-    "surry": "PHF",
-    "sussex": "PHF",
-    "southampton": "PHF",
-    "isle of wight": "PHF",
-    "franklin": "PHF"
+    "pittsburgh": "PIT",
+    "cleveland": "CLE",
+    "milwaukee": "MKE",
+    "nashville": "BNA",
+    "memphis": "MEM",
+    "new orleans": "MSY",
+    "raleigh": "RDU",
+    
+    # European cities
+    "istanbul": "IST",       # Main Istanbul airport
+    "paris": "CDG",
+    "london": "LHR",
+    "berlin": "BER",
+    "munich": "MUC",
+    "frankfurt": "FRA",
+    "rome": "FCO",
+    "milan": "MXP",
+    "madrid": "MAD",
+    "barcelona": "BCN",
+    "amsterdam": "AMS",
+    "brussels": "BRU",
+    "zurich": "ZRH",
+    "vienna": "VIE",
+    "prague": "PRG",
+    "warsaw": "WAW",
+    "moscow": "SVO",
+    "athens": "ATH",
+    "lisbon": "LIS",
+    "dublin": "DUB",
+    "copenhagen": "CPH",
+    "stockholm": "ARN",
+    "oslo": "OSL",
+    "helsinki": "HEL",
+    
+    # Asian cities
+    "tokyo": "NRT",
+    "beijing": "PEK",
+    "shanghai": "PVG",
+    "hong kong": "HKG",
+    "singapore": "SIN",
+    "bangkok": "BKK",
+    "kuala lumpur": "KUL",
+    "jakarta": "CGK",
+    "manila": "MNL",
+    "seoul": "ICN",
+    "taipei": "TPE",
+    "mumbai": "BOM",
+    "delhi": "DEL",
+    "bangalore": "BLR",
+    
+    # Middle East
+    "dubai": "DXB",
+    "abu dhabi": "AUH",
+    "doha": "DOH",
+    "riyadh": "RUH",
+    "tel aviv": "TLV",
+    "cairo": "CAI",
+    "amman": "AMM",
+    
+    # Other major cities
+    "toronto": "YYZ",
+    "vancouver": "YVR",
+    "montreal": "YUL",
+    "sydney": "SYD",
+    "melbourne": "MEL",
+    "auckland": "AKL",
+    "sao paulo": "GRU",
+    "rio de janeiro": "GIG",
+    "buenos aires": "EZE",
+    "mexico city": "MEX",
+    "cancun": "CUN",
+    "johannesburg": "JNB",
+    "cape town": "CPT",
+}
+
+# Airport code to city name mapping
+AIRPORT_CODES: Dict[str, str] = {
+    "IAD": "Washington Dulles",
+    "DCA": "Washington Reagan",
+    "BWI": "Baltimore/Washington",
+    "JFK": "New York JFK",
+    "EWR": "Newark",
+    "LGA": "LaGuardia",
+    "IST": "Istanbul",
+    "SAW": "Istanbul Sabiha",
+    "ORD": "Chicago O'Hare",
+    "MDW": "Chicago Midway",
+    "LAX": "Los Angeles",
+    "SFO": "San Francisco",
+    "ATL": "Atlanta",
+    "DFW": "Dallas Fort Worth",
+    "MIA": "Miami",
+    "BOS": "Boston",
+    "SEA": "Seattle",
+    "DEN": "Denver",
+    "LAS": "Las Vegas",
+    "PHX": "Phoenix",
+    "MCO": "Orlando",
+    "CDG": "Paris Charles de Gaulle",
+    "ORY": "Paris Orly",
+    "LHR": "London Heathrow",
+    "LGW": "London Gatwick",
+    "NRT": "Tokyo Narita",
+    "HND": "Tokyo Haneda",
 }
 
 def get_iata_code(city_name: str) -> Optional[str]:
@@ -238,6 +173,10 @@ def get_iata_code(city_name: str) -> Optional[str]:
     if normalized in COMMON_IATA_CODES:
         return COMMON_IATA_CODES[normalized]
     
+    # Check if it's already an airport code
+    if normalized.upper() in AIRPORT_CODES:
+        return normalized.upper()
+    
     # Try partial matches for common patterns
     for city, code in COMMON_IATA_CODES.items():
         if normalized in city or city in normalized:
@@ -245,16 +184,37 @@ def get_iata_code(city_name: str) -> Optional[str]:
     
     return None
 
-def get_airport_codes(city_name: str) -> list:
+def get_airport_name(iata_code: str) -> str:
+    """Get airport name from IATA code"""
+    return AIRPORT_CODES.get(iata_code.upper(), iata_code.upper())
+
+def get_all_airport_codes(city_name: str) -> List[str]:
     """
     Get all possible airport codes for a city
-    
-    Args:
-        city_name: City name
-        
-    Returns:
-        List of IATA codes
+    Special handling for multi-airport cities
     """
+    normalized = city_name.lower().strip()
+    
+    # Special cases for cities with multiple airports
+    multi_airport_cities = {
+        "new york": ["JFK", "EWR", "LGA"],
+        "nyc": ["JFK", "EWR", "LGA"],
+        "washington": ["IAD", "DCA", "BWI"],
+        "washington dc": ["IAD", "DCA", "BWI"],
+        "dc": ["IAD", "DCA", "BWI"],
+        "chicago": ["ORD", "MDW"],
+        "london": ["LHR", "LGW", "STN", "LCY"],
+        "paris": ["CDG", "ORY"],
+        "tokyo": ["NRT", "HND"],
+        "istanbul": ["IST", "SAW"],
+        "los angeles": ["LAX", "BUR", "SNA", "LGB"],
+        "san francisco": ["SFO", "OAK", "SJC"],
+    }
+    
+    if normalized in multi_airport_cities:
+        return multi_airport_cities[normalized]
+    
+    # Otherwise return single airport
     iata_code = get_iata_code(city_name)
     if iata_code:
         return [iata_code]

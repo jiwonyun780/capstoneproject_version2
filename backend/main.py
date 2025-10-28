@@ -15,6 +15,7 @@ import asyncio
 from services.amadeus_service import AmadeusService
 from services.intent_detector import IntentDetector
 from services.cache_manager import CacheManager
+from services.flight_formatter import format_flight_for_dashboard
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -606,35 +607,75 @@ async def chat(req: ChatRequest):
         has_flight_keywords = any(keyword in user_message.lower() for keyword in flight_keywords)
         logger.info(f"Flight keyword check: {has_flight_keywords}")
         
-        # Skip intent detection for now - just use basic logic
+        # Use intent detection for proper parsing
         logger.info(f"Processing message for session {session_id}: {user_message[:100]}...")
-        intent = {"type": "general", "confidence": 0.0, "has_required_params": False, "params": {}}
         
-        # Debug logging for intent detection
-        logger.info(f"Intent detection result: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
-        logger.info(f"Extracted parameters: {intent['params']}")
+        # Detect intent using the intent detector
+        if intent_detector:
+            try:
+                intent = await intent_detector.analyze_message(user_message, req.messages)
+                logger.info(f"Intent detection result: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
+                logger.info(f"Extracted parameters: {intent['params']}")
+            except Exception as e:
+                logger.error(f"Intent detection failed: {e}")
+                intent = {"type": "general", "confidence": 0.0, "has_required_params": False, "params": {}}
+        else:
+            intent = {"type": "general", "confidence": 0.0, "has_required_params": False, "params": {}}
         
         amadeus_data = None
         
         # Always fetch flight data if flight keywords are detected, regardless of intent detection
         if has_flight_keywords:
-            logger.info("Flight keywords detected - extracting route and fetching data")
-            # Extract route information from the user's message
-            route_info = extract_route_from_message(user_message)
-            logger.info(f"Extracted route info: {route_info}")
+            logger.info("Flight keywords detected - using intent detection for route and dates")
             
-            # Extract dates from the user's message
-            date_info = extract_dates_from_message(user_message)
-            logger.info(f"Extracted date info: {date_info}")
+            # Use intent detection results if available, otherwise fallback to extraction
+            if intent["type"] == "flight_search" and intent["has_required_params"]:
+                logger.info("Using intent detection results for flight search")
+                origin = intent["params"].get("origin", "")
+                destination = intent["params"].get("destination", "")
+                departure_date = intent["params"].get("departure_date", "")
+                return_date = intent["params"].get("return_date")
+                adults = intent["params"].get("adults", 1)
+                max_price = intent["params"].get("max_price")
+            else:
+                logger.info("Intent detection incomplete - falling back to message extraction")
+                # Extract route information from the user's message
+                route_info = extract_route_from_message(user_message)
+                logger.info(f"Extracted route info: {route_info}")
+                
+                # Extract dates from the user's message
+                date_info = extract_dates_from_message(user_message)
+                logger.info(f"Extracted date info: {date_info}")
+                
+                # Combine route and date information
+                route_info.update(date_info)
+                
+                origin = route_info.get('origin_code', '')
+                destination = route_info.get('destination_code', '')
+                departure_date = route_info.get('departure_date', '')
+                return_date = route_info.get('return_date')
+                adults = 1
+                max_price = None
             
-            # Combine route and date information
-            route_info.update(date_info)
-            
-            # Temporarily use mock data to test enhanced features
-            logger.info("Using enhanced mock data for testing")
-            amadeus_data = generate_mock_flight_data(route_info)
-            
-            logger.info(f"Final amadeus_data with route: {amadeus_data.get('route', 'NO ROUTE')}")
+            # Call real Amadeus API if we have the required parameters
+            if origin and destination and departure_date and amadeus_service:
+                try:
+                    logger.info(f"Calling Amadeus API: {origin} -> {destination} on {departure_date}")
+                    amadeus_data = await amadeus_service.search_flights(
+                        origin=origin,
+                        destination=destination,
+                        departure_date=departure_date,
+                        return_date=return_date,
+                        adults=adults,
+                        max_price=max_price
+                    )
+                    logger.info(f"Amadeus API returned: {amadeus_data.get('count', 0) if amadeus_data else 0} flights")
+                except Exception as e:
+                    logger.error(f"Amadeus API call failed: {e}")
+                    amadeus_data = {"error": f"API call failed: {str(e)}"}
+            else:
+                logger.warning("Missing required parameters for Amadeus API call")
+                amadeus_data = {"error": "Missing origin, destination, or departure date"}
         # If travel intent detected and has required parameters, fetch data
         elif intent["type"] != "general" and intent["has_required_params"] and intent["confidence"] > 0.5:
             logger.info(f"Detected {intent['type']} intent with confidence {intent['confidence']}")
@@ -764,12 +805,52 @@ async def chat(req: ChatRequest):
             else:
                 reply = "I'm sorry, I'm having trouble processing your request right now. Please try again."
             
+        # Format flight data for dashboard if available
+        dashboard_data = None
+        if amadeus_data and not amadeus_data.get('error') and amadeus_data.get('flights'):
+            try:
+                # Get route information for formatter
+                origin_city = "Unknown"
+                dest_city = "Unknown"
+                origin_code = ""
+                dest_code = ""
+                departure_date = ""
+                return_date = None
+                
+                # Extract from intent params if available
+                if intent["type"] == "flight_search" and intent["has_required_params"]:
+                    origin_code = intent["params"].get("origin", "")
+                    dest_code = intent["params"].get("destination", "")
+                    departure_date = intent["params"].get("departure_date", "")
+                    return_date = intent["params"].get("return_date")
+                
+                # Get city names from codes
+                from services.iata_codes import get_airport_name
+                origin_city = get_airport_name(origin_code) if origin_code else "Unknown"
+                dest_city = get_airport_name(dest_code) if dest_code else "Unknown"
+                
+                # Format for dashboard
+                dashboard_data = format_flight_for_dashboard(
+                    flight_data=amadeus_data,
+                    origin_city=origin_city,
+                    dest_city=dest_city,
+                    origin_code=origin_code,
+                    dest_code=dest_code,
+                    departure_date=departure_date,
+                    return_date=return_date
+                )
+                logger.info("Successfully formatted flight data for dashboard")
+            except Exception as e:
+                logger.error(f"Failed to format flight data for dashboard: {e}")
+                dashboard_data = None
+        
         return {
             "reply": reply,
             "session_id": session_id,
             "intent_detected": intent["type"],
             "data_fetched": amadeus_data is not None and not amadeus_data.get('error'),
-            "amadeus_data": amadeus_data if amadeus_data is not None else None
+            "amadeus_data": amadeus_data if amadeus_data is not None else None,
+            "dashboard_data": dashboard_data
         }
     except HTTPException:
         raise
@@ -911,7 +992,7 @@ def extract_route_from_message(message):
         'phoenix': 'PHX', 'phx': 'PHX',
         'las vegas': 'LAS', 'las': 'LAS',
         'orlando': 'MCO', 'mco': 'MCO',
-        'washington dc': 'DCA', 'washington': 'DCA', 'dc': 'DCA', 'dca': 'DCA',
+        'washington dc': 'IAD', 'washington': 'IAD', 'dc': 'IAD', 'dca': 'DCA',
         'ohio': 'CMH', 'columbus': 'CMH', 'cleveland': 'CLE', 'cincinnati': 'CVG', 'cmh': 'CMH', 'cle': 'CLE', 'cvg': 'CVG',
         'houston': 'IAH', 'iah': 'IAH',
         'detroit': 'DTW', 'dtw': 'DTW',
