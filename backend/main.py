@@ -1301,6 +1301,92 @@ async def generate_optimal_itinerary_endpoint(req: OptimalItineraryRequest):
         logger.error(f"[OPTIMAL_ITINERARY] Error: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating optimal itinerary: {str(e)}")
 
+@app.post("/api/fetchItineraryData")
+async def fetch_itinerary_data(req: Dict[str, Any]):
+    """
+    Fetch hotels and activities for itinerary generation
+    """
+    try:
+        destination_code = req.get('destinationCode', '')
+        destination_name = req.get('destinationName', '')
+        check_in = req.get('checkIn', '')
+        check_out = req.get('checkOut', '')
+        adults = req.get('adults', 1)
+        
+        if not amadeus_service:
+            return {
+                'ok': False,
+                'error': 'Amadeus service not available',
+                'hotels': [],
+                'activities': []
+            }
+        
+        hotels = []
+        activities = []
+        
+        # Fetch hotels
+        if destination_code and check_in and check_out:
+            try:
+                from services.iata_codes import get_iata_code
+                # Try to get city code from destination code or name
+                city_code = destination_code
+                if len(city_code) == 3 and city_code.isupper():
+                    # It's an airport code, try to use it as city code
+                    pass
+                else:
+                    # Try to get IATA code from city name
+                    city_code = get_iata_code(destination_name or destination_code) or destination_code
+                
+                hotel_result = amadeus_service.search_hotels(
+                    city_code=city_code,
+                    check_in=check_in,
+                    check_out=check_out,
+                    adults=adults
+                )
+                
+                if not hotel_result.get('error') and hotel_result.get('hotels'):
+                    hotels = hotel_result['hotels'][:20]  # Limit to 20 hotels
+                    logger.info(f"[ITINERARY_DATA] Found {len(hotels)} hotels")
+            except Exception as e:
+                logger.error(f"[ITINERARY_DATA] Error fetching hotels: {e}")
+        
+        # Fetch activities - need coordinates for activities
+        # For now, we'll return empty activities list and let frontend handle it
+        # In production, you'd need to geocode the destination to get coordinates
+        try:
+            # Try to get coordinates from hotel data if available
+            if hotels and len(hotels) > 0:
+                first_hotel = hotels[0]
+                latitude = first_hotel.get('latitude')
+                longitude = first_hotel.get('longitude')
+                
+                if latitude and longitude:
+                    activity_result = amadeus_service.search_activities(
+                        latitude=float(latitude),
+                        longitude=float(longitude),
+                        radius=20  # 20km radius
+                    )
+                    
+                    if not activity_result.get('error') and activity_result.get('activities'):
+                        activities = activity_result['activities'][:30]  # Limit to 30 activities
+                        logger.info(f"[ITINERARY_DATA] Found {len(activities)} activities")
+        except Exception as e:
+            logger.error(f"[ITINERARY_DATA] Error fetching activities: {e}")
+        
+        return {
+            'ok': True,
+            'hotels': hotels,
+            'activities': activities
+        }
+    except Exception as e:
+        logger.error(f"[ITINERARY_DATA] Error: {e}")
+        return {
+            'ok': False,
+            'error': str(e),
+            'hotels': [],
+            'activities': []
+        }
+
 @app.post("/api/optimizeTrip")
 async def optimize_trip(preferences: TripPreferences):
     """

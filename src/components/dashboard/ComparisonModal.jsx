@@ -56,9 +56,10 @@ const formatDuration = (durationStr) => {
   return durationStr; // Keep original format (e.g., "12h 15m")
 };
 
-// Prepare data for bar chart
+// Prepare data for bar chart - Only compare exactly 2 flights
 const prepareBarChartData = (selectedFlight, alternativeFlights) => {
-  const allFlights = [selectedFlight, ...alternativeFlights.slice(0, 2)]; // Max 2 alternatives
+  // Only take exactly 2 flights: the selected one and one alternative
+  const allFlights = [selectedFlight, ...alternativeFlights.slice(0, 1)]; // Only 1 alternative = exactly 2 flights total
   
   // Find max values for normalization
   const prices = allFlights.map(f => f.price || 0);
@@ -104,20 +105,21 @@ const prepareBarChartData = (selectedFlight, alternativeFlights) => {
   const currencySymbol = defaultCurrency === 'EUR' ? '€' : defaultCurrency === 'USD' ? '$' : defaultCurrency;
   
   // Transform to recharts format: each metric is a data point
+  // Show actual values (not normalized) for better readability
   const metrics = [
-    { key: 'priceNorm', label: 'Price', actualKey: 'actualPrice', format: (val) => `${currencySymbol}${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-    { key: 'durationNorm', label: 'Duration', actualKey: 'actualDuration', format: (val) => val },
-    { key: 'stopsNorm', label: 'Stops', actualKey: 'actualStops', format: (val) => val === 0 ? 'Non-stop' : `${val} stop${val > 1 ? 's' : ''}` },
-    { key: 'convenienceNorm', label: 'Convenience', actualKey: 'actualConvenience', format: (val) => `${Math.round(val * 100)}%` },
-    { key: 'valueNorm', label: 'Value', actualKey: 'valueNorm', format: (val) => `${Math.round(val * 100)}%` }
+    { key: 'actualPrice', label: 'Cost', format: (val) => `${currencySymbol}${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
+    { key: 'actualDurationHours', label: 'Duration (hours)', format: (val) => `${val.toFixed(1)}h` },
+    { key: 'actualStops', label: 'Stops', format: (val) => val === 0 ? 'Non-stop' : `${val} stop${val > 1 ? 's' : ''}` },
+    { key: 'actualConvenience', label: 'Convenience', format: (val) => `${Math.round(val * 100)}%` }
   ];
   
   const barData = metrics.map(metric => {
     const dataPoint = { metric: metric.label };
     flightData.forEach((flight) => {
-      dataPoint[flight.id] = flight[metric.key];
-      dataPoint[`${flight.id}_actual`] = flight[metric.actualKey];
-      dataPoint[`${flight.id}_formatted`] = metric.format(flight[metric.actualKey]);
+      const value = flight[metric.key];
+      dataPoint[flight.id] = value;
+      dataPoint[`${flight.id}_formatted`] = metric.format(value);
+      dataPoint[`${flight.id}_label`] = flight.fullName; // Store label for tooltip
     });
     return dataPoint;
   });
@@ -125,9 +127,15 @@ const prepareBarChartData = (selectedFlight, alternativeFlights) => {
   return { barData, flightData };
 };
 
-// Calculate summary insights
+// Calculate summary insights for exactly 2 flights
 const calculateSummary = (flightData) => {
   const insights = [];
+  
+  if (flightData.length !== 2) {
+    return insights; // Only works with exactly 2 flights
+  }
+  
+  const [flight1, flight2] = flightData;
   
   // Helper function to format price with currency
   const formatPrice = (price, currency) => {
@@ -135,34 +143,45 @@ const calculateSummary = (flightData) => {
     return `${symbol}${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
   
-  // Find cheapest
-  const cheapest = flightData.reduce((min, flight) => 
-    flight.actualPrice < min.actualPrice ? flight : min
-  );
+  // Find cheaper flight
+  const cheaper = flight1.actualPrice < flight2.actualPrice ? flight1 : flight2;
+  const moreExpensive = flight1.actualPrice < flight2.actualPrice ? flight2 : flight1;
+  const priceDifference = Math.abs(flight1.actualPrice - flight2.actualPrice);
   insights.push({
     type: 'cheapest',
     icon: '💰',
-    text: `Cheapest option: ${cheapest.airline} — ${formatPrice(cheapest.actualPrice, cheapest.currency)} round-trip.`
+    text: `${cheaper.fullName} is cheaper by ${formatPrice(priceDifference, cheaper.currency)} (${formatPrice(cheaper.actualPrice, cheaper.currency)} vs ${formatPrice(moreExpensive.actualPrice, moreExpensive.currency)}).`
   });
   
-  // Find fastest
-  const fastest = flightData.reduce((min, flight) => 
-    flight.actualDurationHours < min.actualDurationHours ? flight : min
-  );
+  // Find faster flight
+  const faster = flight1.actualDurationHours < flight2.actualDurationHours ? flight1 : flight2;
+  const slower = flight1.actualDurationHours < flight2.actualDurationHours ? flight2 : flight1;
+  const timeDifference = Math.abs(flight1.actualDurationHours - flight2.actualDurationHours);
   insights.push({
     type: 'fastest',
     icon: '⚡',
-    text: `Fastest route: ${fastest.airline} — ${fastest.actualDuration} total duration.`
+    text: `${faster.fullName} is faster by ${timeDifference.toFixed(1)} hours (${faster.actualDuration} vs ${slower.actualDuration}).`
   });
   
-  // Find best overall (highest value score)
-  const bestOverall = flightData.reduce((best, flight) => 
-    flight.valueNorm > best.valueNorm ? flight : best
-  );
+  // Find best overall value (balance of cost and convenience)
+  // Calculate value score: lower price and higher convenience = better
+  const calculateValueScore = (flight) => {
+    // Normalize: lower price = higher score, higher convenience = higher score
+    const maxPrice = Math.max(flight1.actualPrice, flight2.actualPrice);
+    const priceScore = 1 - (flight.actualPrice / maxPrice); // 0-1, higher is better
+    const convenienceScore = flight.actualConvenience; // 0-1, higher is better
+    return (priceScore * 0.6) + (convenienceScore * 0.4); // Weight price more
+  };
+  
+  const score1 = calculateValueScore(flight1);
+  const score2 = calculateValueScore(flight2);
+  const bestValue = score1 > score2 ? flight1 : flight2;
+  const otherFlight = score1 > score2 ? flight2 : flight1;
+  
   insights.push({
     type: 'best',
     icon: '✅',
-    text: `Best overall: ${bestOverall.airline} — balances cost and travel time.`
+    text: `${bestValue.fullName} offers the best overall value — balances cost (${formatPrice(bestValue.actualPrice, bestValue.currency)}) and convenience better than ${otherFlight.fullName}.`
   });
   
   return insights;
@@ -171,13 +190,6 @@ const calculateSummary = (flightData) => {
 // Custom tooltip for bar chart
 const CustomTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
-    const flightIds = payload.map(p => p.dataKey);
-    const actualValues = payload.map(p => {
-      const key = p.dataKey;
-      const actualKey = key.replace('_norm', '') + '_actual';
-      return p.payload[actualKey] || p.payload[key];
-    });
-    
     return (
       <div style={{
         backgroundColor: 'white',
@@ -191,8 +203,8 @@ const CustomTooltip = ({ active, payload, label }) => {
         </p>
         {payload.map((entry, index) => {
           const flightId = entry.dataKey;
-          const actualKey = `${flightId}_formatted`;
-          const actualValue = entry.payload[actualKey] || entry.value;
+          const formattedValue = entry.payload[`${flightId}_formatted`] || entry.value;
+          const flightLabel = entry.payload[`${flightId}_label`] || entry.name;
           
           return (
             <p key={index} style={{ 
@@ -200,7 +212,7 @@ const CustomTooltip = ({ active, payload, label }) => {
               color: entry.color,
               fontSize: '13px'
             }}>
-              {entry.name}: <strong>{actualValue}</strong>
+              <strong>{flightLabel}:</strong> {formattedValue}
             </p>
           );
         })}
@@ -289,7 +301,8 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
     );
   }
   
-  const colors = ['#00ADEF', '#FF6B6B', '#4ECDC4'];
+  // Use consistent colors for exactly 2 flights
+  const colors = ['#00ADEF', '#FF6B6B'];
   
   return (
     <div
@@ -360,7 +373,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           color: '#666',
           fontSize: '14px'
         }}>
-          Compare selected flight with alternatives
+          Comparing {flightData.length} flight{flightData.length !== 1 ? 's' : ''} side by side
         </p>
         
         {/* Bar Chart */}
@@ -369,20 +382,18 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
             <BarChart
               data={barData}
               layout="vertical"
-              margin={{ top: 20, right: 30, left: 120, bottom: 20 }}
+              margin={{ top: 20, right: 30, left: 140, bottom: 20 }}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
               <XAxis 
                 type="number" 
-                domain={[0, 1]}
                 tick={{ fill: '#64748b', fontSize: 11 }}
-                tickFormatter={(value) => `${Math.round(value * 100)}%`}
               />
               <YAxis 
                 type="category" 
                 dataKey="metric" 
                 tick={{ fill: '#64748b', fontSize: 12 }}
-                width={100}
+                width={130}
               />
               <Tooltip content={<CustomTooltip />} />
               <Legend 
@@ -394,33 +405,45 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                   key={flight.id}
                   dataKey={flight.id}
                   name={flight.fullName}
-                  fill={colors[index]}
+                  fill={colors[index % colors.length]}
                   radius={[0, 4, 4, 0]}
                 >
                   {barData.map((entry, idx) => (
-                    <Cell key={`cell-${idx}`} fill={colors[index]} />
+                    <Cell key={`cell-${idx}`} fill={colors[index % colors.length]} />
                   ))}
                 </Bar>
               ))}
             </BarChart>
           </ResponsiveContainer>
           
-          {/* Actual values display below chart */}
+          {/* Flight labels below chart */}
           <div style={{ 
             marginTop: '16px', 
-            display: 'grid', 
-            gridTemplateColumns: `repeat(${flightData.length + 1}, 1fr)`,
-            gap: '8px',
+            display: 'flex', 
+            justifyContent: 'center',
+            gap: '24px',
             fontSize: '12px'
           }}>
-            <div style={{ fontWeight: '600', color: '#64748b' }}>Actual Values:</div>
             {flightData.map((flight, index) => {
               const priceSymbol = flight.currency === 'EUR' ? '€' : flight.currency === 'USD' ? '$' : flight.currency || '€';
               return (
-                <div key={flight.id} style={{ color: colors[index], textAlign: 'center' }}>
-                  <div style={{ fontWeight: '600' }}>{flight.airline}</div>
-                  <div style={{ marginTop: '4px', fontSize: '11px', color: '#64748b' }}>
-                    {priceSymbol}{flight.actualPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} | {flight.actualDuration} | {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
+                <div key={flight.id} style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: '8px',
+                  color: colors[index % colors.length]
+                }}>
+                  <div style={{ 
+                    width: '12px', 
+                    height: '12px', 
+                    backgroundColor: colors[index % colors.length],
+                    borderRadius: '2px'
+                  }}></div>
+                  <div>
+                    <div style={{ fontWeight: '600' }}>{flight.fullName}</div>
+                    <div style={{ marginTop: '2px', fontSize: '11px', color: '#64748b' }}>
+                      {priceSymbol}{flight.actualPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} • {flight.actualDuration} • {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
+                    </div>
                   </div>
                 </div>
               );
@@ -428,34 +451,39 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           </div>
         </div>
         
-        {/* Summary Section */}
+        {/* Quick Insights Section */}
         {summary && summary.length > 0 && (
           <div style={{
             marginBottom: '32px',
-            padding: '16px',
+            padding: '20px',
             backgroundColor: '#f0f9ff',
             borderRadius: '8px',
             border: '1px solid #00ADEF'
           }}>
             <h3 style={{
               marginTop: 0,
-              marginBottom: '12px',
-              fontSize: '16px',
+              marginBottom: '16px',
+              fontSize: '18px',
               fontWeight: '600',
               color: '#004C8C'
             }}>
               Quick Insights
             </h3>
-            {summary.map((insight, index) => (
-              <div key={index} style={{
-                marginBottom: index < summary.length - 1 ? '8px' : 0,
-                fontSize: '14px',
-                color: '#1e40af'
-              }}>
-                <span style={{ fontSize: '16px', marginRight: '8px' }}>{insight.icon}</span>
-                <strong>{insight.text}</strong>
-              </div>
-            ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {summary.map((insight, index) => (
+                <div key={index} style={{
+                  padding: '12px',
+                  backgroundColor: 'white',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  color: '#1e40af',
+                  border: '1px solid #bae6fd'
+                }}>
+                  <span style={{ fontSize: '18px', marginRight: '10px' }}>{insight.icon}</span>
+                  {insight.text}
+                </div>
+              ))}
+            </div>
           </div>
         )}
         
@@ -555,18 +583,6 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           </div>
         </div>
         
-        {/* Info note */}
-        <div style={{ 
-          marginTop: '24px',
-          padding: '12px',
-          backgroundColor: '#f0f9ff',
-          borderRadius: '8px',
-          fontSize: '12px',
-          color: '#64748b',
-          border: '1px solid #bae6fd'
-        }}>
-          💡 <strong>Note:</strong> Metrics are normalized (0-1) for comparison. Lower values are better for price, duration, and stops, so they are inverted in the chart. Hover over bars to see actual values.
-        </div>
       </div>
     </div>
   );

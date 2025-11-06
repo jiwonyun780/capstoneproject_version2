@@ -610,7 +610,9 @@ function renderCellContent(cell, rowIndex, cellIndex) {
 
 // FlightTableComparison component to handle comparison state
 function FlightTableComparison({ rows, messageContent, tableIndex }) {
-  const [selectedFlight, setSelectedFlight] = useState(null);
+  const [firstFlight, setFirstFlight] = useState(null);
+  const [secondFlight, setSecondFlight] = useState(null);
+  const [showFlightSelection, setShowFlightSelection] = useState(false);
   const [showComparison, setShowComparison] = useState(false);
   const [mounted, setMounted] = useState(false);
   
@@ -628,17 +630,10 @@ function FlightTableComparison({ rows, messageContent, tableIndex }) {
       const selectedRow = rows[rowIndex];
       const selected = rowToFlight(headerRow, selectedRow, rowIndex);
       
-      // Convert all other rows to alternative flights
-      const alternativeFlights = [];
-      for (let i = 1; i < rows.length; i++) {
-        if (i !== rowIndex) {
-          alternativeFlights.push(rowToFlight(headerRow, rows[i], i));
-        }
-      }
-      
-      console.log('Comparing flight:', selected, 'alternatives:', alternativeFlights);
-      setSelectedFlight(selected);
-      setShowComparison(true);
+      // Set first flight and show selection UI
+      setFirstFlight(selected);
+      setShowFlightSelection(true);
+      setSecondFlight(null);
     };
     
     window.addEventListener('compareFlight', handleCompare);
@@ -665,9 +660,15 @@ function FlightTableComparison({ rows, messageContent, tableIndex }) {
     const departureIndex = getColumnIndex(['departure']);
     const arrivalIndex = getColumnIndex(['arrival']);
     
-    // Extract price (remove $ and parse)
+    // Extract price and currency (remove $, € and parse)
     const priceStr = priceIndex >= 0 && dataRow[priceIndex] ? dataRow[priceIndex].toString().trim() : '0';
-    const priceMatch = priceStr.match(/\$?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+    let currency = 'USD'; // Default
+    if (priceStr.includes('€') || priceStr.includes('EUR')) {
+      currency = 'EUR';
+    } else if (priceStr.includes('$') || priceStr.includes('USD')) {
+      currency = 'USD';
+    }
+    const priceMatch = priceStr.match(/[€$]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
     const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
     
     // Extract stops
@@ -680,6 +681,7 @@ function FlightTableComparison({ rows, messageContent, tableIndex }) {
       airline: airlineIndex >= 0 && dataRow[airlineIndex] ? dataRow[airlineIndex].toString().trim() : 'Unknown',
       flightNumber: flightCodeIndex >= 0 && dataRow[flightCodeIndex] ? dataRow[flightCodeIndex].toString().trim() : '',
       price: price,
+      currency: currency,
       duration: durationIndex >= 0 && dataRow[durationIndex] ? dataRow[durationIndex].toString().trim() : '',
       stops: stops,
       departure: departureIndex >= 0 && dataRow[departureIndex] ? dataRow[departureIndex].toString().trim() : '',
@@ -687,32 +689,169 @@ function FlightTableComparison({ rows, messageContent, tableIndex }) {
     };
   };
   
-  // Get alternative flights
-  const getAlternativeFlights = () => {
-    if (!selectedFlight || rows.length < 2) return [];
+  // Get all available flights for selection
+  const getAvailableFlights = () => {
+    if (rows.length < 2) return [];
     
     const headerRow = rows[0];
-    const alternativeFlights = [];
+    const availableFlights = [];
     for (let i = 1; i < rows.length; i++) {
       const flight = rowToFlight(headerRow, rows[i], i);
-      if (flight.id !== selectedFlight.id) {
-        alternativeFlights.push(flight);
+      // Exclude the first selected flight
+      if (!firstFlight || flight.id !== firstFlight.id) {
+        availableFlights.push(flight);
       }
     }
-    return alternativeFlights.slice(0, 2); // Max 2 alternatives
+    return availableFlights;
   };
+  
+  // Handle second flight selection
+  const handleSelectSecondFlight = (flight) => {
+    setSecondFlight(flight);
+    setShowFlightSelection(false);
+    setShowComparison(true);
+  };
+  
+  // Close selection and comparison
+  const handleClose = () => {
+    setShowFlightSelection(false);
+    setShowComparison(false);
+    setFirstFlight(null);
+    setSecondFlight(null);
+  };
+  
+  const availableFlights = getAvailableFlights();
   
   return (
     <>
-      {/* Comparison Modal */}
-      {mounted && showComparison && selectedFlight && createPortal(
-        <ComparisonModal
-          selectedFlight={selectedFlight}
-          alternativeFlights={getAlternativeFlights()}
-          onClose={() => {
-            setShowComparison(false);
-            setSelectedFlight(null);
+      {/* Flight Selection Modal */}
+      {mounted && showFlightSelection && firstFlight && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+            padding: '20px'
           }}
+          onClick={handleClose}
+        >
+          <div
+            style={{
+              backgroundColor: 'white',
+              borderRadius: '12px',
+              padding: '24px',
+              maxWidth: '600px',
+              width: '100%',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+              position: 'relative'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={handleClose}
+              style={{
+                position: 'absolute',
+                top: '16px',
+                right: '16px',
+                background: 'none',
+                border: 'none',
+                fontSize: '24px',
+                cursor: 'pointer',
+                color: '#666',
+                padding: '4px 8px',
+                borderRadius: '4px',
+                transition: 'background-color 0.2s'
+              }}
+              onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+            >
+              ×
+            </button>
+            
+            <h2 style={{ 
+              marginTop: 0, 
+              marginBottom: '8px',
+              fontSize: '24px',
+              fontWeight: '600',
+              color: '#004C8C'
+            }}>
+              Select Flight to Compare
+            </h2>
+            <p style={{ 
+              marginTop: 0, 
+              marginBottom: '20px',
+              color: '#666',
+              fontSize: '14px'
+            }}>
+              You selected: <strong>{firstFlight.airline} {firstFlight.flightNumber}</strong>. Choose a second flight to compare.
+            </p>
+            
+            {availableFlights.length === 0 ? (
+              <p style={{ color: '#666', textAlign: 'center', padding: '20px' }}>
+                No other flights available for comparison.
+              </p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {availableFlights.map((flight) => (
+                  <button
+                    key={flight.id}
+                    onClick={() => handleSelectSecondFlight(flight)}
+                    style={{
+                      padding: '16px',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '8px',
+                      backgroundColor: 'white',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.target.style.backgroundColor = '#f0f9ff';
+                      e.target.style.borderColor = '#00ADEF';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.target.style.backgroundColor = 'white';
+                      e.target.style.borderColor = '#e2e8f0';
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: '600', color: '#004C8C', marginBottom: '4px' }}>
+                        {flight.airline} {flight.flightNumber}
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#666' }}>
+                        {flight.duration} • {flight.stops === 0 ? 'Non-stop' : `${flight.stops} stop${flight.stops > 1 ? 's' : ''}`}
+                      </div>
+                    </div>
+                    <div style={{ fontWeight: '600', color: '#00ADEF', fontSize: '16px' }}>
+                      {flight.currency === 'EUR' ? '€' : flight.currency === 'USD' ? '$' : flight.currency || '$'}{flight.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+      
+      {/* Comparison Modal - Only show when both flights are selected */}
+      {mounted && showComparison && firstFlight && secondFlight && createPortal(
+        <ComparisonModal
+          selectedFlight={firstFlight}
+          alternativeFlights={[secondFlight]}
+          onClose={handleClose}
         />,
         document.body
       )}
@@ -736,9 +875,9 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     ))
   );
 
-  // Extract flight summary from table and message
+  // Extract flight summary from table and message - returns both display string and data object
   const extractFlightSummary = () => {
-    if (!isFlightTable || rows.length < 2) return null;
+    if (!isFlightTable || rows.length < 2) return { display: null, data: null };
     
     const headerRow = rows[0];
     const firstDataRow = rows[1]; // First flight option
@@ -767,17 +906,11 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const originFromTable = originIndex >= 0 && firstDataRow[originIndex] ? firstDataRow[originIndex].toString().trim() : null;
     const destFromTable = destIndex >= 0 && firstDataRow[destIndex] ? firstDataRow[destIndex].toString().trim() : null;
     
-    // Debug logging (remove in production)
-    console.log('Flight summary extraction:', {
-      headerRow: headerRow,
-      firstDataRow: firstDataRow,
-      priceIndex, stopsIndex, originIndex, destIndex,
-      price, stops, originFromTable, destFromTable
-    });
-    
     // Extract airport codes from message (look for patterns like "IAD → BCN" or "JFK to CDG")
     let originCode = null;
     let destCode = null;
+    let originCity = null;
+    let destCity = null;
     
     // First, try to extract from table columns if available
     if (originFromTable && destFromTable) {
@@ -787,6 +920,10 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       if (originMatch && destMatch) {
         originCode = originMatch[1];
         destCode = destMatch[1];
+      } else {
+        // Might be city names
+        originCity = originFromTable;
+        destCity = destFromTable;
       }
     }
     
@@ -834,8 +971,16 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       }
     }
     
+    // Extract city names from message
+    const routeMatch = messageContent.match(/from\s+([^to()]+)\s+to\s+([^\n()]+)/i);
+    if (routeMatch) {
+      originCity = routeMatch[1].trim().replace(/\([^)]*\)/g, '').trim();
+      destCity = routeMatch[2].trim().split(/\s+/)[0].replace(/\([^)]*\)/g, '').trim();
+    }
+    
     // Extract dates from message
-    let dateRange = null;
+    let departureDate = null;
+    let returnDate = null;
     const datePatterns = [
       /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
       /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
@@ -855,68 +1000,21 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     });
     
     if (dateMatches.length > 0) {
-      const formatDate = (dateStr) => {
-        const parts = dateStr.trim().split(/\s+/);
-        if (parts.length >= 2) {
-          const month = parts[0].toLowerCase();
-          const day = parts[1];
-          const monthIndex = monthNames.indexOf(month);
-          const abbrevIndex = monthAbbrevs.indexOf(month);
-          if (monthIndex >= 0) {
-            // Capitalize first letter: "nov" -> "Nov"
-            const monthAbbrev = monthNames[monthIndex].substring(0, 3);
-            return monthAbbrev.charAt(0).toUpperCase() + monthAbbrev.substring(1) + ' ' + day;
-          } else if (abbrevIndex >= 0) {
-            const monthAbbrev = monthAbbrevs[abbrevIndex].substring(0, 3);
-            return monthAbbrev.charAt(0).toUpperCase() + monthAbbrev.substring(1) + ' ' + day;
-          }
-        }
-        return dateStr;
-      };
-      
-      if (dateMatches.length === 1) {
-        dateRange = formatDate(dateMatches[0]);
-      } else if (dateMatches.length >= 2) {
-        const firstDate = formatDate(dateMatches[0]);
-        const secondDate = formatDate(dateMatches[1]);
-        // Extract month and days: "Nov 13" and "Nov 16" -> "Nov 13–16"
-        const firstParts = firstDate.split(' ');
-        const secondParts = secondDate.split(' ');
-        if (firstParts.length === 2 && secondParts.length === 2 && firstParts[0] === secondParts[0]) {
-          // Same month: "Nov 13–16"
-          dateRange = `${firstParts[0]} ${firstParts[1]}–${secondParts[1]}`;
-        } else {
-          // Different months: "Nov 13–Dec 5"
-          dateRange = `${firstDate}–${secondDate}`;
-        }
+      departureDate = dateMatches[0];
+      if (dateMatches.length > 1) {
+        returnDate = dateMatches[1];
       }
     }
     
     // Extract stop information
     let stopInfo = null;
     if (stops) {
-      // Remove any HTML tags or markdown links
       const cleanStops = stops.replace(/\[.*?\]\(.*?\)/g, '').replace(/<[^>]*>/g, '').trim();
-      
       const stopMatch = cleanStops.match(/(\d+)\s+stop/i);
       if (stopMatch) {
         const stopCount = parseInt(stopMatch[1]);
         if (stopCount > 0) {
-          // Try to find layover airport codes in the stops cell or message
-          // Check if the stops cell contains airport code like "1 stop (LIS)" or "1 stop LIS"
-          const layoverInCell = cleanStops.match(/(?:\(|via|in|through)\s*([A-Z]{3})/i);
-          if (layoverInCell) {
-            stopInfo = `${stopCount} stop (${layoverInCell[1]})`;
-          } else {
-            // Try to find in message
-            const layoverPattern = /(?:via|stop in|layover in|through)\s+([A-Z]{3})/i;
-            const layoverMatch = messageContent.match(layoverPattern);
-            if (layoverMatch) {
-              stopInfo = `${stopCount} stop (${layoverMatch[1]})`;
-            } else {
-              stopInfo = `${stopCount} stop${stopCount > 1 ? 's' : ''}`;
-            }
-          }
+          stopInfo = `${stopCount} stop${stopCount > 1 ? 's' : ''}`;
         } else {
           stopInfo = 'Non-stop';
         }
@@ -930,32 +1028,39 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     // Extract and clean price
     let cleanPrice = null;
     if (price) {
-      // Remove any HTML tags or markdown links
       const cleanPriceStr = price.replace(/\[.*?\]\(.*?\)/g, '').replace(/<[^>]*>/g, '').trim();
-      // Extract price (look for $ sign and numbers)
       const priceMatch = cleanPriceStr.match(/\$?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
       if (priceMatch) {
         cleanPrice = '$' + priceMatch[1].replace(/,/g, '');
-      } else if (cleanPriceStr) {
-        // If no $ sign, try to find just numbers
-        const numMatch = cleanPriceStr.match(/(\d+(?:,\d{3})*(?:\.\d{2})?)/);
-        if (numMatch) {
-          cleanPrice = '$' + numMatch[1].replace(/,/g, '');
-        }
       }
     }
     
-    // Build summary - only include if we have meaningful data
+    // Build data object for navigation
+    const summaryData = {
+      originCode: originCode,
+      destCode: destCode,
+      originCity: originCity,
+      destCity: destCity,
+      origin: originCity || originCode,
+      destination: destCity || destCode,
+      departureDate: departureDate,
+      returnDate: returnDate,
+      price: cleanPrice,
+      stops: stopInfo
+    };
+    
+    // Build display string
     const parts = [];
     if (originCode && destCode) {
       parts.push(`${originCode} → ${destCode}`);
+    } else if (originCity && destCity) {
+      parts.push(`${originCity} → ${destCity}`);
     } else {
-      // If no codes, don't show summary
-      return null;
+      return { display: null, data: summaryData };
     }
     
-    if (dateRange) {
-      parts.push(dateRange);
+    if (departureDate) {
+      parts.push(departureDate);
     }
     
     if (cleanPrice) {
@@ -966,11 +1071,13 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       parts.push(stopInfo);
     }
     
-    // Only return summary if we have at least origin/destination and one more piece of info
-    return parts.length >= 2 ? parts.join(' | ') : null;
+    const displayString = parts.length >= 2 ? parts.join(' | ') : null;
+    return { display: displayString, data: summaryData };
   };
 
-  const flightSummary = isFlightTable ? extractFlightSummary() : null;
+  const flightSummaryResult = isFlightTable ? extractFlightSummary() : null;
+  const flightSummary = flightSummaryResult?.display || null;
+  const flightSummaryData = flightSummaryResult?.data || null;
   
   // Helper function to get column index for flight table
   const getColumnIndex = (keywords) => {
@@ -1109,7 +1216,16 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
         }}>
           {onGenerateItinerary && (
             <button
-              onClick={() => onGenerateItinerary(messageContent)}
+              onClick={() => {
+                // Extract route info from table and message
+                const summaryResult = extractFlightSummary();
+                const routeData = {
+                  messageContent: messageContent,
+                  flightSummary: summaryResult?.data || null,
+                  tableRows: rows
+                };
+                onGenerateItinerary(JSON.stringify(routeData));
+              }}
               style={{
                 backgroundColor: '#00ADEF',
                 color: 'white',

@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
@@ -128,6 +129,7 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
 }
 
 export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
@@ -559,23 +561,151 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     return { destination, departureDate, returnDate };
   };
 
-  // Handle Generate Itinerary button click
-  const handleGenerateItinerary = (messageContent) => {
-    const tripInfo = extractTripInfo(messageContent);
-    const destination = tripInfo.destination || 'your destination';
-    const dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
-    if (tripInfo.returnDate) {
-      dates += ` to ${tripInfo.returnDate}`;
+  // Handle Generate Itinerary button click - navigate to itinerary page
+  const handleGenerateItinerary = (messageContentOrData) => {
+    // Try to parse as JSON first (if it contains route data from MessageBubble)
+    let routeData = null;
+    let messageContent = messageContentOrData;
+    
+    try {
+      routeData = JSON.parse(messageContentOrData);
+      if (routeData.messageContent) {
+        messageContent = routeData.messageContent;
+      }
+    } catch (e) {
+      // Not JSON, treat as plain message content
+      messageContent = messageContentOrData;
     }
-    const message = `Would you like me to find hotels in ${destination}${dates}?`;
-    handleSend(message);
+    
+    // Use dashboardData if available (most reliable)
+    if (dashboardData && dashboardData.route) {
+      // Navigate with existing dashboard data
+      navigate('/itinerary', {
+        state: {
+          routeInfo: dashboardData.route,
+          flights: dashboardData.flights || [],
+          outboundFlights: dashboardData.outboundFlights || [],
+          returnFlights: dashboardData.returnFlights || [],
+          preferences: userPreferences ? { preferences: userPreferences } : null
+        }
+      });
+      return;
+    }
+    
+    // Extract from routeData if available (from MessageBubble table extraction)
+    if (routeData && routeData.flightSummary) {
+      const summary = routeData.flightSummary;
+      // Extract from message content if summary doesn't have all info
+      const msgContent = routeData.messageContent || messageContent;
+      
+      // Try to extract route from message patterns
+      const routeMatch = msgContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
+      let departure = summary.originCity || summary.origin || 'Unknown';
+      let destination = summary.destCity || summary.destination || 'Unknown';
+      let departureCode = summary.originCode || '';
+      let destinationCode = summary.destCode || '';
+      
+      if (routeMatch) {
+        departure = routeMatch[1].trim();
+        destination = routeMatch[2].trim().split(/\s+/)[0];
+      }
+      
+      // Try to extract airport codes from message
+      const codeMatch = msgContent.match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
+      if (codeMatch && !departureCode && !destinationCode) {
+        departureCode = codeMatch[1];
+        destinationCode = codeMatch[2];
+      }
+      
+      // Extract dates from message
+      const datePatterns = [
+        /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
+        /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
+      ];
+      const dateMatches = [];
+      datePatterns.forEach(pattern => {
+        const matches = msgContent.match(pattern);
+        if (matches) dateMatches.push(...matches);
+      });
+      
+      let departureDate = summary.departureDate || null;
+      let returnDate = summary.returnDate || null;
+      
+      if (dateMatches.length > 0 && !departureDate) {
+        departureDate = dateMatches[0];
+      }
+      if (dateMatches.length > 1 && !returnDate) {
+        returnDate = dateMatches[1];
+      }
+      
+      const routeInfo = {
+        departure: departure,
+        destination: destination,
+        departureCode: departureCode,
+        destinationCode: destinationCode,
+        date: departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        returnDate: returnDate || null
+      };
+      
+      navigate('/itinerary', {
+        state: {
+          routeInfo: routeInfo,
+          flights: [],
+          outboundFlights: [],
+          returnFlights: [],
+          preferences: userPreferences ? { preferences: userPreferences } : null
+        }
+      });
+      return;
+    }
+    
+    // Fallback: Extract from message content
+    const tripInfo = extractTripInfo(messageContent);
+    
+    // Try to extract route info from message patterns
+    const routeMatch = messageContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
+    let departure = 'Unknown';
+    let destination = 'Unknown';
+    let departureCode = '';
+    let destinationCode = '';
+    
+    if (routeMatch) {
+      departure = routeMatch[1].trim();
+      destination = routeMatch[2].trim().split(/\s+/)[0]; // Get first word after "to"
+    }
+    
+    // Try to extract airport codes (e.g., "IAD → BCN" or "JFK to CDG")
+    const codeMatch = messageContent.match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
+    if (codeMatch) {
+      departureCode = codeMatch[1];
+      destinationCode = codeMatch[2];
+    }
+    
+    const routeInfo = {
+      departure: departure,
+      destination: tripInfo.destination || destination,
+      departureCode: departureCode,
+      destinationCode: destinationCode,
+      date: tripInfo.departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      returnDate: tripInfo.returnDate || null
+    };
+    
+    navigate('/itinerary', {
+      state: {
+        routeInfo: routeInfo,
+        flights: [],
+        outboundFlights: [],
+        returnFlights: [],
+        preferences: userPreferences ? { preferences: userPreferences } : null
+      }
+    });
   };
 
   // Handle Save Trip button click
   const handleSaveTrip = (messageContent) => {
     const tripInfo = extractTripInfo(messageContent);
     const destination = tripInfo.destination || 'your destination';
-    const dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
+    let dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
     if (tripInfo.returnDate) {
       dates += ` to ${tripInfo.returnDate}`;
     }
@@ -593,7 +723,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       onSaveTrip={m.role === 'assistant' ? (messageContent) => handleSaveTrip(messageContent) : null}
     />
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  )), [messages]);
+  )), [messages, dashboardData, userPreferences]);
 
   // Show onboarding form if not completed
   if (!onboardingComplete) {

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { FlightMap } from './FlightMap';
 import { PriceChart } from './PriceChart';
 import { FlightsTable } from './FlightsTable';
@@ -87,6 +88,8 @@ const flightsData = [
 ];
 
 export function FlightDashboard({ searchData = null }) {
+  const navigate = useNavigate();
+  
   // Debug logging
   console.log('FlightDashboard received searchData:', searchData);
   console.log('FlightDashboard route from searchData:', searchData?.route);
@@ -226,14 +229,17 @@ export function FlightDashboard({ searchData = null }) {
         }}>
             <button
               onClick={() => {
-                if (searchData?.onGenerateItinerary) {
-                  searchData.onGenerateItinerary({
-                    destination: routeInfo.destination || routeInfo.destinationCode,
-                    destinationCode: routeInfo.destinationCode,
-                    departureDate: routeInfo.date || routeInfo.departure_display,
-                    returnDate: routeInfo.return_display,
-                  });
-                }
+                // Navigate to optimized itinerary page with flight data
+                // Preferences will be loaded from localStorage or use defaults
+                navigate('/itinerary', {
+                  state: {
+                    routeInfo: routeInfo,
+                    flights: displayFlightsData,
+                    outboundFlights: searchData?.outboundFlights || [],
+                    returnFlights: searchData?.returnFlights || [],
+                    preferences: searchData?.preferences || null
+                  }
+                });
               }}
               className="inline-flex items-center justify-center px-6 py-3 bg-[#00ADEF] text-white font-semibold rounded-lg hover:bg-[#006AAF] transition-colors shadow-md hover:shadow-lg"
               style={{

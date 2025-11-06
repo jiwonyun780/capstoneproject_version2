@@ -5,6 +5,7 @@ import './styles/globals.css';
 import './styles/site.css';
 import Home from './pages/Home';
 import Chat from './pages/Chat';
+import OptimizedItinerary from './pages/OptimizedItinerary';
 import { FlightDashboard } from './components/dashboard/FlightDashboard';
 
 function App() {
@@ -80,6 +81,10 @@ function App() {
             onSaveTrip={handleSaveTrip}
           />
         } 
+      />
+      <Route 
+        path="/itinerary" 
+        element={<OptimizedItinerary />} 
       />
     </Routes>
   );

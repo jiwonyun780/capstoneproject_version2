@@ -515,14 +515,20 @@ class AmadeusService:
         """Format hotel search response"""
         hotels = []
         for offer in response.get("data", []):
+            hotel_data = offer.get("hotel", {})
+            geo_code = hotel_data.get("geoCode", {})
             hotel_info = {
-                "hotel_id": offer.get("hotel", {}).get("hotelId"),
-                "name": offer.get("hotel", {}).get("name"),
-                "rating": offer.get("hotel", {}).get("rating"),
+                "hotel_id": hotel_data.get("hotelId"),
+                "name": hotel_data.get("name"),
+                "rating": hotel_data.get("rating"),
                 "price": offer.get("offers", [{}])[0].get("price", {}).get("total"),
                 "currency": offer.get("offers", [{}])[0].get("price", {}).get("currency"),
                 "check_in": offer.get("offers", [{}])[0].get("checkInDate"),
-                "check_out": offer.get("offers", [{}])[0].get("checkOutDate")
+                "check_out": offer.get("offers", [{}])[0].get("checkOutDate"),
+                "latitude": geo_code.get("latitude") if geo_code else None,
+                "longitude": geo_code.get("longitude") if geo_code else None,
+                "location": hotel_data.get("address", {}).get("cityName") or hotel_data.get("name", ""),
+                "distance": 0  # Default distance, could be calculated if needed
             }
             hotels.append(hotel_info)
         
