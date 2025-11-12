@@ -7,11 +7,13 @@ import Home from './pages/Home';
 import Chat from './pages/Chat';
 import OptimizedItinerary from './pages/OptimizedItinerary';
 import { FlightDashboard } from './components/dashboard/FlightDashboard';
+import { FlightSelectionProvider } from './context/FlightSelectionContext';
 
 function App() {
   const [showDashboard, setShowDashboard] = useState(false);
   const [dashboardData, setDashboardData] = useState(null);
   const [pendingMessage, setPendingMessage] = useState(null);
+  const [pendingMessageMetadata, setPendingMessageMetadata] = useState(null);
 
   // Function to show dashboard when user asks about prices/flights
   const handleShowDashboard = (data) => {
@@ -28,14 +30,26 @@ function App() {
   };
 
   // Function to handle Generate Itinerary button click
-  const handleGenerateItinerary = (tripInfo) => {
-    const destination = tripInfo.destination || tripInfo.destinationCode;
-    const dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
-    if (tripInfo.returnDate) {
-      dates += ` to ${tripInfo.returnDate}`;
+  const handleGenerateItinerary = (tripInfo = {}) => {
+    if (tripInfo.message) {
+      setPendingMessage(tripInfo.message);
+      setPendingMessageMetadata(
+        tripInfo.metadata || {
+          intent: 'generate_itinerary_from_selection',
+          routeInfo: tripInfo.routeInfo || null,
+          selectedFlights: tripInfo.selectedFlights || [],
+        }
+      );
+    } else {
+      const destination = tripInfo.destination || tripInfo.destinationCode;
+      let dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
+      if (tripInfo.returnDate) {
+        dates += ` to ${tripInfo.returnDate}`;
+      }
+      const message = `Would you like me to find hotels in ${destination}${dates}?`;
+      setPendingMessage(message);
+      setPendingMessageMetadata(null);
     }
-    const message = `Would you like me to find hotels in ${destination}${dates}?`;
-    setPendingMessage(message);
     setShowDashboard(false);
     setDashboardData(null);
     // Navigate will be handled by the component
@@ -56,37 +70,43 @@ function App() {
   };
 
   return (
-    <Routes>
-      <Route path="/" element={<Home />} />
-      <Route 
-        path="/chat" 
-        element={
-          <Chat 
-            onShowDashboard={handleShowDashboard}
-            showDashboard={showDashboard}
-            dashboardData={dashboardData}
-            onHideDashboard={handleHideDashboard}
+    <FlightSelectionProvider>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route 
+          path="/chat" 
+          element={
+            <Chat 
+              onShowDashboard={handleShowDashboard}
+              showDashboard={showDashboard}
+              dashboardData={dashboardData}
+              onHideDashboard={handleHideDashboard}
             pendingMessage={pendingMessage}
-            onPendingMessageSent={() => setPendingMessage(null)}
-          />
-        } 
-      />
-      <Route 
-        path="/dashboard" 
-        element={
-          <DashboardWrapper 
-            searchData={dashboardData}
-            onBack={handleHideDashboard}
-            onGenerateItinerary={handleGenerateItinerary}
-            onSaveTrip={handleSaveTrip}
-          />
-        } 
-      />
-      <Route 
-        path="/itinerary" 
-        element={<OptimizedItinerary />} 
-      />
-    </Routes>
+            pendingMessageMetadata={pendingMessageMetadata}
+            onPendingMessageSent={() => {
+              setPendingMessage(null);
+              setPendingMessageMetadata(null);
+            }}
+            />
+          } 
+        />
+        <Route 
+          path="/dashboard" 
+          element={
+            <DashboardWrapper 
+              searchData={dashboardData}
+              onBack={handleHideDashboard}
+              onGenerateItinerary={handleGenerateItinerary}
+              onSaveTrip={handleSaveTrip}
+            />
+          } 
+        />
+        <Route 
+          path="/itinerary" 
+          element={<OptimizedItinerary />} 
+        />
+      </Routes>
+    </FlightSelectionProvider>
   );
 }
 

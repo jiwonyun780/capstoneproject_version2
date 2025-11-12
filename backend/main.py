@@ -16,6 +16,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from services.amadeus_service import AmadeusService
 from services.intent_detector import IntentDetector
 from services.cache_manager import CacheManager
+from services.scoring import (
+    normalize_weights as normalize_preference_weights,
+    calculate_total_score as calculate_weighted_score,
+    DEFAULT_WEIGHTS as DEFAULT_PREFERENCE_WEIGHTS,
+)
 
 
 # Configure logging
@@ -35,6 +40,138 @@ if not api_key:
 
 print(f"OpenAI API key loaded: {api_key[:10]}..." if api_key else "No API key found")
 client = OpenAI(api_key=api_key)
+
+# Mapping to translate airport codes / city names to Amadeus hotel city codes
+HOTEL_CITY_CODE_OVERRIDES: Dict[str, str] = {
+    # United States
+    "JFK": "NYC",
+    "EWR": "NYC",
+    "LGA": "NYC",
+    "NYC": "NYC",
+    "NEW YORK": "NYC",
+    "NY": "NYC",
+    "BOS": "BOS",
+    "BOSTON": "BOS",
+    "LAX": "LAX",
+    "LOS ANGELES": "LAX",
+    "SFO": "SFO",
+    "SAN FRANCISCO": "SFO",
+    "SEA": "SEA",
+    "SEATTLE": "SEA",
+    "ORD": "CHI",
+    "MDW": "CHI",
+    "CHICAGO": "CHI",
+    "MIA": "MIA",
+    "MIAMI": "MIA",
+    "IAD": "WAS",
+    "DCA": "WAS",
+    "BWI": "WAS",
+    "WASHINGTON": "WAS",
+    "WASHINGTON DC": "WAS",
+    "DC": "WAS",
+    "DEN": "DEN",
+    "DENVER": "DEN",
+    "DFW": "DFW",
+    "DAL": "DFW",
+    "DALLAS": "DFW",
+    "ATL": "ATL",
+    "ATLANTA": "ATL",
+    # Europe
+    "CDG": "PAR",
+    "ORY": "PAR",
+    "PAR": "PAR",
+    "PARIS": "PAR",
+    "LHR": "LON",
+    "LGW": "LON",
+    "LTN": "LON",
+    "STN": "LON",
+    "LCY": "LON",
+    "LON": "LON",
+    "LONDON": "LON",
+    "FRA": "FRA",
+    "FRANKFURT": "FRA",
+    "MUC": "MUC",
+    "MUNICH": "MUC",
+    "AMS": "AMS",
+    "AMSTERDAM": "AMS",
+    "BCN": "BCN",
+    "BARCELONA": "BCN",
+    "MAD": "MAD",
+    "MADRID": "MAD",
+    "ROM": "ROM",
+    "FCO": "ROM",
+    "ROME": "ROM",
+    # Asia / Pacific
+    "NRT": "TYO",
+    "HND": "TYO",
+    "TYO": "TYO",
+    "TOKYO": "TYO",
+    "KIX": "OSA",
+    "ITM": "OSA",
+    "OSA": "OSA",
+    "OSAKA": "OSA",
+    "HKG": "HKG",
+    "HONG KONG": "HKG",
+    "SIN": "SIN",
+    "SINGAPORE": "SIN",
+    "ICN": "SEL",
+    "GMP": "SEL",
+    "SEL": "SEL",
+    "SEOUL": "SEL",
+    "BKK": "BKK",
+    "BANGKOK": "BKK",
+    # Oceania
+    "SYD": "SYD",
+    "SYDNEY": "SYD",
+    "MEL": "MEL",
+    "MELBOURNE": "MEL",
+    # Middle East
+    "DXB": "DXB",
+    "DUBAI": "DXB",
+    "DOH": "DOH",
+    "DOHA": "DOH",
+    # Latin America
+    "GRU": "SAO",
+    "CGH": "SAO",
+    "SAO": "SAO",
+    "SAO PAULO": "SAO",
+    "EZE": "BUE",
+    "BUE": "BUE",
+    "BUENOS AIRES": "BUE",
+}
+
+
+def resolve_hotel_city_code(destination_code: Optional[str], destination_name: Optional[str]) -> Optional[str]:
+    """
+    Resolve a destination code or name to a city code supported by the Amadeus hotel API.
+    Prioritises known overrides that translate airport codes (e.g. NRT) to city codes (e.g. TYO).
+    """
+    candidates: List[str] = []
+
+    if destination_code:
+        candidates.append(destination_code.strip().upper())
+    if destination_name:
+        candidates.append(destination_name.strip().upper())
+
+    for candidate in candidates:
+        if candidate in HOTEL_CITY_CODE_OVERRIDES:
+            return HOTEL_CITY_CODE_OVERRIDES[candidate]
+
+    # Try falling back to a direct lookup using our IATA helper
+    try:
+        from services.iata_codes import get_iata_code
+        for value in candidates:
+            code = get_iata_code(value)
+            if code:
+                normalised = code.strip().upper()
+                if normalised in HOTEL_CITY_CODE_OVERRIDES:
+                    return HOTEL_CITY_CODE_OVERRIDES[normalised]
+                return normalised
+    except Exception as lookup_error:
+        logger.warning(f"[ITINERARY_DATA] Failed to resolve city code via IATA lookup: {lookup_error}")
+
+    return None
+
 
 # Initialize services
 try:
@@ -899,6 +1036,38 @@ def format_place_names(text):
     
     return text
 
+def format_links(text):
+    """Ensure all markdown links are bold and underlined"""
+    import re
+
+    link_pattern = re.compile(r'\[(?P<label>[^\]]+)\]\((?P<url>https?://[^\)]+)\)')
+
+    def wrap_link(match):
+        original = match.group(0)
+        if original.startswith('__**[') and original.endswith(')**__'):
+            return original
+        label = match.group('label')
+        url = match.group('url')
+        return f'__**[{label}]({url})**__'
+
+    return link_pattern.sub(wrap_link, text)
+
+def format_provider_mentions(text):
+    """Replace provider names with bold underlined hyperlinks"""
+    import re
+
+    providers = {
+        'GetYourGuide': 'https://www.getyourguide.com/',
+        'Viator': 'https://www.viator.com/',
+    }
+
+    for name, url in providers.items():
+        pattern = re.compile(rf'(?<!\[)(?<!\()(?<!\w){name}(?![\w/])')
+        replacement = f'__**[{name}]({url})**__'
+        text = pattern.sub(replacement, text)
+
+    return text
+
 def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[str, Any]], 
                               activities: List[Dict[str, Any]], preferences: Dict[str, float],
                               userBudget: float) -> Dict[str, Any]:
@@ -916,22 +1085,57 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     Returns:
         Dict containing optimal combination with scores and insights
     """
-    budget_weight = preferences.get('budget', 0.33)
-    quality_weight = preferences.get('quality', 0.33)
-    convenience_weight = preferences.get('convenience', 0.34)
+    normalized_weights = normalize_preference_weights(preferences or DEFAULT_PREFERENCE_WEIGHTS)
+    budget_weight = normalized_weights['budget']
+    quality_weight = normalized_weights['quality']
+    convenience_weight = normalized_weights['convenience']
+
+    logger.info(
+        "[OPTIMAL_ITINERARY] Weights: budget=%.3f, quality=%.3f, convenience=%.3f",
+        budget_weight,
+        quality_weight,
+        convenience_weight,
+    )
     
-    # Normalize weights to ensure they sum to 1
-    total_weight = budget_weight + quality_weight + convenience_weight
-    if total_weight > 0:
-        budget_weight /= total_weight
-        quality_weight /= total_weight
-        convenience_weight /= total_weight
-    else:
-        budget_weight = quality_weight = convenience_weight = 1/3
+    if not flights:
+        logger.warning("[OPTIMAL_ITINERARY] No flights supplied; cannot generate itinerary")
+        return {
+            'ok': False,
+            'error': 'No flight options available to optimise. Please run a flight search first.'
+        }
+
+    if not hotels:
+        logger.warning("[OPTIMAL_ITINERARY] No hotels supplied - creating placeholder entry")
+        hotels = [{
+            'id': 'placeholder-hotel',
+            'name': 'Hotel options coming soon',
+            'price': 0,
+            'currency': 'USD',
+            'rating': 4.0,
+            'distance': 0.5,
+            'location': '',
+            'notes': 'No hotel data returned yet – this placeholder keeps the itinerary balanced.',
+            '_placeholder': True
+        }]
+
+    if not activities:
+        logger.warning("[OPTIMAL_ITINERARY] No activities supplied - creating placeholder entry")
+        activities = [{
+            'id': 'placeholder-activity',
+            'name': 'Activities coming soon',
+            'price': {'amount': 0, 'currencyCode': 'USD'},
+            'rating': 4.2,
+            'minimumDuration': 'PT2H',
+            'shortDescription': 'Local experiences will appear here once available.',
+            'notes': 'No activity data returned yet – this placeholder keeps the itinerary balanced.',
+            '_placeholder': True
+        }]
     
-    logger.info(f"[OPTIMAL_ITINERARY] Weights: budget={budget_weight:.3f}, quality={quality_weight:.3f}, convenience={convenience_weight:.3f}")
-    
-    # Normalize metrics on 0-1 scale for each category
+    # Helper to clamp between 0 and 1
+    def clamp01(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    # Normalize metrics on 0-100 scale for each category
     def normalize_flight_metrics(flight_list):
         """Extract and normalize flight metrics"""
         if not flight_list:
@@ -995,27 +1199,34 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             rating = ratings[i]
             
             # Budget score: 1 - (price / maxPrice) - lower price is better
-            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
+            budget_score = clamp01(1 - (price / max_price) if max_price > 0 else 0.5)
             
             # Quality score: rating / 5 - higher rating is better
-            quality_score = rating / 5.0
+            quality_score = clamp01(rating / 5.0)
             
             # Convenience score: 1 - (duration / maxDuration) - shorter duration is better
-            convenience_score = 1 - (duration / max_duration) if max_duration > 0 else 0.5
+            convenience_score = clamp01(1 - (duration / max_duration) if max_duration > 0 else 0.5)
             
-            # Calculate category score
-            category_score = (
-                budget_weight * budget_score +
-                quality_weight * quality_score +
-                convenience_weight * convenience_score
-            )
+            # Convert to 0-100 scale before weighting
+            budget_score_pct = budget_score * 100
+            quality_score_pct = quality_score * 100
+            convenience_score_pct = convenience_score * 100
             
+            score_components = {
+                'budget': budget_score_pct,
+                'quality': quality_score_pct,
+                'convenience': convenience_score_pct,
+            }
+
+            category_score = calculate_weighted_score(score_components, normalized_weights)
+
             normalized_flights.append({
                 **flight,
-                '_budget_score': budget_score,
-                '_quality_score': quality_score,
-                '_convenience_score': convenience_score,
+                '_budget_score': budget_score_pct,
+                '_quality_score': quality_score_pct,
+                '_convenience_score': convenience_score_pct,
                 '_category_score': category_score,
+                '_score_components': score_components,
                 '_price': price,
                 '_duration': duration,
                 '_rating': rating
@@ -1059,22 +1270,31 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             rating = ratings[i]
             distance = distances[i]
             
-            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
-            quality_score = rating / 5.0
-            convenience_score = 1 - (distance / max_distance) if max_distance > 0 else 0.5
+            budget_score = clamp01(1 - (price / max_price) if max_price > 0 else 0.5)
+            quality_score = clamp01(rating / 5.0)
+            convenience_score = clamp01(1 - (distance / max_distance) if max_distance > 0 else 0.5)
+            
+            budget_score_pct = budget_score * 100
+            quality_score_pct = quality_score * 100
+            convenience_score_pct = convenience_score * 100
             
             category_score = (
-                budget_weight * budget_score +
-                quality_weight * quality_score +
-                convenience_weight * convenience_score
+                budget_weight * budget_score_pct +
+                quality_weight * quality_score_pct +
+                convenience_weight * convenience_score_pct
             )
             
             normalized_hotels.append({
                 **hotel,
-                '_budget_score': budget_score,
-                '_quality_score': quality_score,
-                '_convenience_score': convenience_score,
+                '_budget_score': budget_score_pct,
+                '_quality_score': quality_score_pct,
+                '_convenience_score': convenience_score_pct,
                 '_category_score': category_score,
+                '_score_components': {
+                    'budget': budget_score_pct,
+                    'quality': quality_score_pct,
+                    'convenience': convenience_score_pct,
+                },
                 '_price': price,
                 '_rating': rating,
                 '_distance': distance
@@ -1128,22 +1348,31 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             rating = ratings[i]
             duration = durations[i]
             
-            budget_score = 1 - (price / max_price) if max_price > 0 else 0.5
-            quality_score = rating / 5.0
-            convenience_score = 1 - (duration / max_duration) if max_duration > 0 else 0.5
+            budget_score = clamp01(1 - (price / max_price) if max_price > 0 else 0.5)
+            quality_score = clamp01(rating / 5.0)
+            convenience_score = clamp01(1 - (duration / max_duration) if max_duration > 0 else 0.5)
+            
+            budget_score_pct = budget_score * 100
+            quality_score_pct = quality_score * 100
+            convenience_score_pct = convenience_score * 100
             
             category_score = (
-                budget_weight * budget_score +
-                quality_weight * quality_score +
-                convenience_weight * convenience_score
+                budget_weight * budget_score_pct +
+                quality_weight * quality_score_pct +
+                convenience_weight * convenience_score_pct
             )
             
             normalized_activities.append({
                 **activity,
-                '_budget_score': budget_score,
-                '_quality_score': quality_score,
-                '_convenience_score': convenience_score,
+                '_budget_score': budget_score_pct,
+                '_quality_score': quality_score_pct,
+                '_convenience_score': convenience_score_pct,
                 '_category_score': category_score,
+                '_score_components': {
+                    'budget': budget_score_pct,
+                    'quality': quality_score_pct,
+                    'convenience': convenience_score_pct,
+                },
                 '_price': price,
                 '_rating': rating,
                 '_duration': duration
@@ -1206,26 +1435,50 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     flight = best_combination['flight']
     hotel = best_combination['hotel']
     activity = best_combination['activity']
+
+    flight_currency = (
+        flight.get('currency')
+        or flight.get('currencyCode')
+        or flight.get('price', {}).get('currency')
+        or 'USD'
+    )
+    hotel_currency = (
+        hotel.get('currency')
+        or hotel.get('currencyCode')
+        or hotel.get('price', {}).get('currency')
+        or 'USD'
+    )
+    if isinstance(activity.get('price'), dict):
+        activity_currency = (
+            activity.get('price', {}).get('currencyCode')
+            or activity.get('price', {}).get('currency')
+            or 'USD'
+        )
+    else:
+        activity_currency = activity.get('currency', 'USD')
     
-    insights = []
-    if budget_weight > 0.4:
-        insights.append("excellent value")
-    if quality_weight > 0.4:
-        insights.append("high quality options")
-    if convenience_weight > 0.4:
-        insights.append("minimal travel time")
+    budget_weight_pct = round(budget_weight * 100)
+    quality_weight_pct = round(quality_weight * 100)
+    convenience_weight_pct = round(convenience_weight * 100)
+    weight_summary_text = (
+        f"Budget {budget_weight_pct}%, Quality {quality_weight_pct}%, Convenience {convenience_weight_pct}%"
+    )
     
-    if not insights:
-        insights.append("balanced combination")
+    primary_focus = []
+    if budget_weight_pct > quality_weight_pct and budget_weight_pct > convenience_weight_pct:
+        primary_focus.append("maximising savings")
+    if quality_weight_pct > budget_weight_pct and quality_weight_pct > convenience_weight_pct:
+        primary_focus.append("delivering premium quality")
+    if convenience_weight_pct > budget_weight_pct and convenience_weight_pct > quality_weight_pct:
+        primary_focus.append("reducing travel time")
     
-    insight_text = f"This combination offers the best balance of {', '.join(insights)} while staying within your budget."
+    if not primary_focus:
+        primary_focus.append("balancing cost, quality, and convenience")
     
-    if budget_weight > 0.4 and best_combination['total_price'] < userBudget * 0.8:
-        insight_text += " You're saving significantly while still getting great options."
-    elif quality_weight > 0.4:
-        insight_text += " Premium quality selections that match your preferences."
-    elif convenience_weight > 0.4:
-        insight_text += " Optimized for convenience and minimal hassle."
+    insight_text = (
+        f"This combination scored highest after ranking every option on a 0–100 scale using your weights "
+        f"({weight_summary_text}). It excels at {', '.join(primary_focus)} while staying within your budget."
+    )
     
     result = {
         'ok': True,
@@ -1234,6 +1487,7 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             'airline': flight.get('airline', 'Unknown'),
             'flightNumber': flight.get('flightNumber', flight.get('flight_number', 'N/A')),
             'price': flight['_price'],
+            'currency': flight_currency,
             'duration': flight['_duration'],
             'rating': flight['_rating'],
             'departure': flight.get('departure', flight.get('departureAirport', 'N/A')),
@@ -1249,9 +1503,12 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             'id': hotel.get('hotel_id', hotel.get('id')),
             'name': hotel.get('name', 'Unknown Hotel'),
             'price': hotel['_price'],
+            'currency': hotel_currency,
             'rating': hotel['_rating'],
             'distance': hotel['_distance'],
             'location': hotel.get('location', hotel.get('city', 'N/A')),
+            'placeholder': bool(hotel.get('_placeholder')),
+            'notes': hotel.get('notes', ''),
             'scores': {
                 'budget': hotel['_budget_score'],
                 'quality': hotel['_quality_score'],
@@ -1263,9 +1520,12 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             'id': activity.get('id'),
             'name': activity.get('name', 'Unknown Activity'),
             'price': activity['_price'],
+            'currency': activity_currency,
             'rating': activity['_rating'],
             'duration': activity['_duration'],
             'description': activity.get('shortDescription', activity.get('description', '')),
+            'placeholder': bool(activity.get('_placeholder')),
+            'notes': activity.get('notes', ''),
             'scores': {
                 'budget': activity['_budget_score'],
                 'quality': activity['_quality_score'],
@@ -1274,7 +1534,24 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
             }
         },
         'total_price': best_combination['total_price'],
-        'total_score': best_combination['total_score'],
+        'total_score': round(best_combination['total_score'], 2),
+        'score_components': {
+            'flight': round(flight['_category_score'], 2),
+            'hotel': round(hotel['_category_score'], 2),
+            'activity': round(activity['_category_score'], 2),
+        },
+        'weights': {
+            'budget': budget_weight,
+            'quality': quality_weight,
+            'convenience': convenience_weight,
+        },
+        'weights_percent': {
+            'budget': budget_weight_pct,
+            'quality': quality_weight_pct,
+            'convenience': convenience_weight_pct,
+        },
+        'weight_summary': weight_summary_text,
+        'currency': flight_currency,
         'insight': insight_text
     }
     
@@ -1327,16 +1604,11 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
         # Fetch hotels
         if destination_code and check_in and check_out:
             try:
-                from services.iata_codes import get_iata_code
-                # Try to get city code from destination code or name
-                city_code = destination_code
-                if len(city_code) == 3 and city_code.isupper():
-                    # It's an airport code, try to use it as city code
-                    pass
-                else:
-                    # Try to get IATA code from city name
-                    city_code = get_iata_code(destination_name or destination_code) or destination_code
-                
+                city_code = resolve_hotel_city_code(destination_code, destination_name)
+                if not city_code:
+                    city_code = destination_code.strip().upper()
+                logger.info(f"[ITINERARY_DATA] Using city_code='{city_code}' for hotel search (input code='{destination_code}', name='{destination_name}')")
+
                 hotel_result = amadeus_service.search_hotels(
                     city_code=city_code,
                     check_in=check_in,
@@ -1347,6 +1619,8 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
                 if not hotel_result.get('error') and hotel_result.get('hotels'):
                     hotels = hotel_result['hotels'][:20]  # Limit to 20 hotels
                     logger.info(f"[ITINERARY_DATA] Found {len(hotels)} hotels")
+                else:
+                    logger.warning(f"[ITINERARY_DATA] Hotel search returned no results for city_code='{city_code}' - response: {hotel_result}")
             except Exception as e:
                 logger.error(f"[ITINERARY_DATA] Error fetching hotels: {e}")
         
@@ -1391,14 +1665,21 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
 async def optimize_trip(preferences: TripPreferences):
     """
     Optimize trip recommendations based on user preferences.
-    Uses weighted scoring: score = budgetWeight * (1/price) + qualityWeight * rating + convenienceWeight * (1/travelTime)
+    Each option is scored on a 0–100 scale for budget, quality, and convenience, then weighted by the user's preferences.
     """
     try:
-        budget_weight = preferences.budget
-        quality_weight = preferences.quality
-        convenience_weight = preferences.convenience
-        
-        logger.info(f"[OPTIMIZE_TRIP] Received preferences: budget={budget_weight}, quality={quality_weight}, convenience={convenience_weight}")
+        preferences_normalized = normalize_preference_weights({
+            'budget': preferences.budget,
+            'quality': preferences.quality,
+            'convenience': preferences.convenience,
+        })
+
+        logger.info(
+            "[OPTIMIZE_TRIP] Received preferences: budget=%.3f, quality=%.3f, convenience=%.3f",
+            preferences_normalized['budget'],
+            preferences_normalized['quality'],
+            preferences_normalized['convenience'],
+        )
         
         # Sample travel options (simulated data)
         # In production, this would come from real flight/hotel APIs
@@ -1430,44 +1711,34 @@ async def optimize_trip(preferences: TripPreferences):
             price = option["price"]
             rating = option["rating"]
             travel_time = option["travelTime"]
-            
-            # Normalize price (lower is better, so use inverse)
-            # Normalize to 0-1 range: (max - value) / (max - min)
+
             normalized_price_score = (max_price - price) / (max_price - min_price) if max_price > min_price else 0.5
-            
-            # Normalize travel time (lower is better, so use inverse)
             normalized_time_score = (max_travel_time - travel_time) / (max_travel_time - min_travel_time) if max_travel_time > min_travel_time else 0.5
-            
-            # Normalize rating (higher is better, already 0-5 scale, normalize to 0-1)
             normalized_rating_score = rating / 5.0
-            
-            # Calculate weighted score
-            # Note: Using normalized_price_score and normalized_time_score ensures all components are 0-1 scale
-            score = (
-                budget_weight * normalized_price_score +
-                quality_weight * normalized_rating_score +
-                convenience_weight * normalized_time_score
-            )
-            
+
+            score_components = {
+                'budget': max(0.0, min(100.0, normalized_price_score * 100)),
+                'quality': max(0.0, min(100.0, normalized_rating_score * 100)),
+                'convenience': max(0.0, min(100.0, normalized_time_score * 100)),
+            }
+
+            total_score = calculate_weighted_score(score_components, preferences_normalized)
+
             scored_options.append({
                 **option,
-                "score": score
+                "score": total_score,
+                "score_components": score_components,
             })
-        
-        # Sort by score (highest first) and return top 3
+
         scored_options.sort(key=lambda x: x["score"], reverse=True)
         top_options = scored_options[:3]
-        
+
         logger.info(f"[OPTIMIZE_TRIP] Returning top 3 options: {[opt['destination'] for opt in top_options]}")
-        
+
         return {
             "ok": True,
             "options": top_options,
-            "weights": {
-                "budget": budget_weight,
-                "quality": quality_weight,
-                "convenience": convenience_weight
-            }
+            "weights": preferences_normalized,
         }
     
     except Exception as e:
@@ -1494,17 +1765,14 @@ async def chat(req: ChatRequest):
         # Check if message contains flight-related keywords
         flight_keywords = [
             'flight', 'flights', 'airline', 'airlines', 'airplane', 'aircraft', 'plane',
-            'ticket', 'tickets', 'booking', 'book', 'reserve', 'reservation',
-            'travel', 'trip', 'journey', 'vacation', 'holiday', 'getaway',
-            'destination', 'departure', 'arrival', 'airport', 'terminal',
-            'price', 'prices', 'cost', 'costs', 'expensive', 'cheap', 'cheapest', 
-            'budget', 'affordable', 'fare', 'fares', 'rate', 'rates',
-            'search', 'find', 'look for', 'show me', 'get me', 'need', 'want',
-            'compare', 'comparison', 'options', 'available', 'schedule',
-            'to', 'from', 'between', 'route', 'way', 'path',
-            'today', 'tomorrow', 'next week', 'this month', 'soon', 'when',
-            'search flights', 'find flights', 'book flights', 'flight search',
-            'airline tickets', 'plane tickets', 'flight booking', 'travel booking'
+            'ticket', 'tickets', 'fare', 'fares', 'airfare',
+            'airport', 'terminal', 'gate',
+            'boarding pass', 'check-in', 'layover', 'stopover',
+            'nonstop flight', 'direct flight',
+            'round trip', 'one-way flight',
+            'flight booking', 'book flight', 'flight schedule',
+            'flight option', 'flight options',
+            'airline tickets', 'plane tickets', 'flight search', 'search flights'
         ]
         
         has_flight_keywords = any(keyword in user_message.lower() for keyword in flight_keywords)
@@ -1745,6 +2013,17 @@ async def chat(req: ChatRequest):
                                 # Update amadeus_data with formatted data
                                 amadeus_data['outboundFlights'] = formatted_data.get('outboundFlights', [])
                                 amadeus_data['returnFlights'] = formatted_data.get('returnFlights', [])
+                                amadeus_data['route'] = formatted_data.get('route', {
+                                    "departure": origin_city,
+                                    "destination": destination_city,
+                                    "departureCode": origin,
+                                    "destinationCode": destination,
+                                    "date": departure_date,
+                                    "departure_display": departure_date,
+                                    "return_display": return_date
+                                })
+                                amadeus_data['priceData'] = formatted_data.get('priceData', [])
+                                amadeus_data['hasRealData'] = formatted_data.get('hasRealData', True)
                                 logger.info(f"[MAIN] Converted to {len(amadeus_data['outboundFlights'])} outbound and {len(amadeus_data.get('returnFlights', []))} return flights")
                             except Exception as e:
                                 logger.error(f"[MAIN] Error converting flight data format: {e}")
@@ -2097,6 +2376,8 @@ async def chat(req: ChatRequest):
                 
                 # Post-process the reply to format place names with bold and underlined text
                 reply = format_place_names(reply)
+                reply = format_links(reply)
+                reply = format_provider_mentions(reply)
             except Exception as e:
                 logger.error(f"OpenAI API error: {e}")
                 # If there's an error in amadeus_data, show that error message instead of generic fallback

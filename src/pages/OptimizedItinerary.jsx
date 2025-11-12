@@ -1,468 +1,750 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ScrollArea } from '../components/ui/scroll-area';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import '../styles/itinerary-layout.css';
+import {
+  normalizePreferenceWeights,
+  loadPreferenceWeights,
+  storePreferenceWeights,
+  DEFAULT_PREFERENCE_WEIGHTS,
+  formatWeightSummary,
+} from '../utils/preferences';
 
-// Helper function to parse duration string to hours
-const parseDuration = (durationStr) => {
-  if (!durationStr) return 0;
-  if (typeof durationStr === 'number') return durationStr;
-  if (durationStr.startsWith('PT')) {
-    const hoursMatch = durationStr.match(/(\d+)H/);
-    const minutesMatch = durationStr.match(/(\d+)M/);
-    const hours = hoursMatch ? parseInt(hoursMatch[1]) : 0;
-    const minutes = minutesMatch ? parseInt(minutesMatch[1]) : 0;
+const formatCurrency = (amount, currency = 'USD', options = {}) => {
+  const numeric = Number.isFinite(amount) ? amount : 0;
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+    ...options,
+  }).format(numeric);
+};
+
+const parseDuration = (value) => {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (value.startsWith('PT')) {
+    const hours = parseInt(value.match(/(\d+)H/)?.[1] ?? '0', 10);
+    const minutes = parseInt(value.match(/(\d+)M/)?.[1] ?? '0', 10);
     return hours + minutes / 60;
   }
-  const hoursMatch = durationStr.match(/(\d+)h/);
-  const minutesMatch = durationStr.match(/(\d+)m/);
-  const hours = hoursMatch ? parseInt(hoursMatch[1]) : 0;
-  const minutes = minutesMatch ? parseInt(minutesMatch[1]) : 0;
+  const hours = parseInt(value.match(/(\d+)h/)?.[1] ?? '0', 10);
+  const minutes = parseInt(value.match(/(\d+)m/)?.[1] ?? '0', 10);
   return hours + minutes / 60;
 };
 
-// Calculate convenience score: 100 – (0.4×normalized_duration + 0.3×normalized_stops + 0.3×normalized_price)
+const formatDurationLabel = (value) => {
+  if (!value) return '—';
+  const total = parseDuration(value);
+  const hours = Math.floor(total);
+  const minutes = Math.round((total - hours) * 60);
+  if (!hours && !minutes) return '—';
+  return `${hours ? `${hours}h` : ''}${minutes ? ` ${minutes}m` : ''}`.trim();
+};
+
+const parseDate = (input) => {
+  if (!input) return new Date();
+  if (input instanceof Date) return input;
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+  return parsed;
+};
+
+const formatDate = (input) => {
+  if (!input) return '';
+  const date = parseDate(input);
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+};
+
+const formatDateRange = (start, end) => {
+  if (!start) return '';
+  const startDate = parseDate(start);
+  if (!end) {
+    return startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  const endDate = parseDate(end);
+  const sameYear = startDate.getFullYear() === endDate.getFullYear();
+  const startOpts = { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' };
+  const endOpts = { month: 'short', day: 'numeric', year: 'numeric' };
+  return `${startDate.toLocaleDateString('en-US', startOpts)} - ${endDate.toLocaleDateString('en-US', endOpts)}`;
+};
+
 const calculateConvenienceScore = (flights, totalPrice, maxPrice) => {
   if (!flights || flights.length === 0) return 0;
-  
-  const totalDuration = flights.reduce((sum, f) => sum + parseDuration(f.duration || f._duration || '0h'), 0);
-  const totalStops = flights.reduce((sum, f) => sum + (f.stops || 0), 0);
-  
-  // Normalize values to 0-1 range
-  const maxDuration = 24; // Assume max 24 hours for normalization
-  const maxStops = 4; // Assume max 4 stops
-  const maxPriceValue = maxPrice > 0 ? maxPrice : 2000; // Fallback max price
+  const totalDuration = flights.reduce((sum, flight) => sum + parseDuration(flight.duration), 0);
+  const totalStops = flights.reduce((sum, flight) => sum + (flight.stops ?? 0), 0);
+
+  const maxDuration = Math.max(8, totalDuration);
+  const maxStops = Math.max(1, totalStops);
+  const maxPriceValue = maxPrice > 0 ? maxPrice : totalPrice || 2000;
   
   const normalizedDuration = Math.min(totalDuration / maxDuration, 1);
   const normalizedStops = Math.min(totalStops / maxStops, 1);
-  const normalizedPrice = Math.min(totalPrice / maxPriceValue, 1);
-  
-  // Calculate score: 100 – (0.4×normalized_duration + 0.3×normalized_stops + 0.3×normalized_price)
-  const score = 100 - (0.4 * normalizedDuration + 0.3 * normalizedStops + 0.3 * normalizedPrice) * 100;
-  return Math.max(0, Math.min(100, Math.round(score))); // Clamp between 0-100
+  const normalizedPrice = Math.min((totalPrice || 0) / maxPriceValue, 1);
+
+  const raw = 100 - (0.4 * normalizedDuration + 0.3 * normalizedStops + 0.3 * normalizedPrice) * 100;
+  return Math.max(0, Math.min(100, Math.round(raw)));
 };
 
-// Format date for display
-const formatDate = (dateStr) => {
-  if (!dateStr) return '';
-  try {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-  } catch (e) {
-    return dateStr;
+const loadStoredPreferences = (locationState) => {
+  if (locationState?.preferences?.preferences) {
+    return normalizePreferenceWeights(locationState.preferences.preferences);
   }
+  if (locationState?.preferences) {
+    return normalizePreferenceWeights(locationState.preferences);
+  }
+  const stored = loadPreferenceWeights();
+  if (stored) {
+    return stored;
+  }
+  return { ...DEFAULT_PREFERENCE_WEIGHTS };
 };
 
-// Parse date string to Date object
-const parseDate = (dateStr) => {
-  if (!dateStr) return new Date();
-  try {
-    // Try ISO format first
-    if (dateStr.includes('-')) {
-      return new Date(dateStr);
+const storePreferences = (preferences) => {
+  storePreferenceWeights(preferences);
+};
+
+const createDayByDayItinerary = (
+  flight,
+  hotel,
+  selectedActivities,
+  allActivities,
+  routeInfo,
+  startDateInput,
+  endDateInput,
+) => {
+  const startDate = parseDate(startDateInput);
+  const endDate = parseDate(endDateInput);
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const stayLength = Math.max(1, Math.ceil((endDate - startDate) / msPerDay));
+  const activitiesPool = (allActivities && allActivities.length > 0 ? allActivities : selectedActivities) || [];
+
+  const days = [];
+  days.push({
+    day: 1,
+    date: formatDate(startDate),
+    items: [
+      {
+        type: 'flight',
+        title: `${flight?.airline || 'Outbound flight'} ${flight?.flightNumber || ''}`.trim(),
+        time: flight?.departure || `${routeInfo?.departureCode || routeInfo?.departure || 'Origin'} → ${routeInfo?.destinationCode || routeInfo?.destination || 'Destination'}`,
+        meta: {
+          departure: flight?.departure || routeInfo?.departureCode || routeInfo?.departure,
+          arrival: flight?.arrival || routeInfo?.destinationCode || routeInfo?.destination,
+          duration: formatDurationLabel(flight?.duration),
+          stops: flight?.stops ?? 0,
+          price: flight?.price ?? 0,
+          currency: flight?.currency || 'USD',
+        },
+      },
+      {
+        type: 'hotel',
+        title: hotel?.name || 'Accommodation check-in',
+        time: 'Check-in',
+        meta: {
+          location: hotel?.location || routeInfo?.destination,
+          rating: hotel?.rating,
+          price: hotel?.price ?? 0,
+          currency: hotel?.currency || 'USD',
+          placeholder: Boolean(hotel?.placeholder),
+        },
+      },
+    ],
+  });
+
+  for (let i = 1; i < stayLength; i += 1) {
+    const currentDate = new Date(startDate.getTime() + i * msPerDay);
+    const slot1 = activitiesPool[(i - 1) * 2];
+    const slot2 = activitiesPool[(i - 1) * 2 + 1];
+    const dayItems = [];
+
+    if (slot1 || slot2) {
+      [slot1, slot2].filter(Boolean).forEach((activity, index) => {
+        dayItems.push({
+          type: 'activity',
+          title: activity.name || activity.title || 'Planned activity',
+          time: activity.startTime || (index === 0 ? 'Morning' : 'Afternoon'),
+          meta: {
+            description: activity.shortDescription || activity.description || '',
+            duration: activity.minimumDuration || activity.duration || 'Flexible',
+            price:
+              (typeof activity.price === 'object'
+                ? Number(activity.price.amount)
+                : Number(activity.price)) || 0,
+              currency:
+                (typeof activity.price === 'object' && activity.price.currencyCode) ||
+                activity.currency ||
+                'USD',
+            location:
+              activity.location?.address || activity.geoCode
+                ? `${activity.geoCode.latitude?.toFixed?.(2) || ''} ${activity.geoCode.longitude?.toFixed?.(2) || ''}`.trim()
+                : activity.location || '',
+            placeholder: Boolean(activity.placeholder || activity._placeholder),
+          },
+        });
+      });
+    } else {
+      dayItems.push({
+        type: 'activity',
+        title: 'Open exploration',
+        time: 'Flexible',
+        meta: {
+          description: 'No specific activities scheduled yet. Use this time to explore freely.',
+          duration: '—',
+          price: 0,
+            currency: 'USD',
+          placeholder: true,
+        },
+      });
     }
-    // Try other formats
-    return new Date(dateStr);
-  } catch (e) {
-    return new Date();
+
+    days.push({
+      day: i + 1,
+      date: formatDate(currentDate),
+      items: dayItems,
+    });
   }
+
+  if (routeInfo?.returnDate) {
+    const returnDate = parseDate(routeInfo.returnDate);
+    days.push({
+      day: days.length + 1,
+      date: formatDate(returnDate),
+      items: [
+        {
+          type: 'flight',
+          title: 'Return flight',
+          time: `${routeInfo.destinationCode || routeInfo.destination || 'Destination'} → ${routeInfo.departureCode || routeInfo.departure || 'Home'}`,
+          meta: {
+            departure: routeInfo.destinationCode || routeInfo.destination,
+            arrival: routeInfo.departureCode || routeInfo.departure,
+            duration: flight?.returnDuration ? formatDurationLabel(flight.returnDuration) : '—',
+            stops: flight?.returnStops ?? 0,
+            price: flight?.returnPrice ?? 0,
+            currency: flight?.currency || 'USD',
+            placeholder: true,
+          },
+        },
+      ],
+    });
+  }
+
+  return days;
+};
+
+const buildFlightCards = (itineraryData, routeInfo) => {
+  if (!itineraryData) return [];
+  const flights = [];
+  if (itineraryData.flight) {
+    flights.push({
+      id: itineraryData.flight.id || 'primary-flight',
+      type: 'Outbound',
+      airline: itineraryData.flight.airline || 'Selected flight',
+      flightNumber: itineraryData.flight.flightNumber,
+      departure: itineraryData.flight.departure || routeInfo.departureCode || routeInfo.departure,
+      arrival: itineraryData.flight.arrival || routeInfo.destinationCode || routeInfo.destination,
+      duration: itineraryData.flight.duration,
+      price: itineraryData.flight.price,
+      currency: itineraryData.flight.currency || 'USD',
+      stops: itineraryData.flight.stops ?? 0,
+      cabin: itineraryData.flight.cabin || itineraryData.flight.travelClass || 'Economy',
+      score: itineraryData.flight.scores?.total,
+      breakdown: itineraryData.flight.scores,
+    });
+  }
+
+  if (routeInfo?.returnDate) {
+    flights.push({
+      id: 'return-flight',
+      type: 'Return',
+      airline: itineraryData.returnFlight?.airline || 'Return flight',
+      flightNumber: itineraryData.returnFlight?.flightNumber || '',
+      departure: itineraryData.returnFlight?.departure || routeInfo.destinationCode || routeInfo.destination,
+      arrival: itineraryData.returnFlight?.arrival || routeInfo.departureCode || routeInfo.departure,
+      duration: itineraryData.returnFlight?.duration || itineraryData.flight?.returnDuration || '',
+      price: itineraryData.returnFlight?.price ?? itineraryData.flight?.returnPrice ?? 0,
+      currency: itineraryData.returnFlight?.currency || itineraryData.flight?.currency || 'USD',
+      stops: itineraryData.returnFlight?.stops ?? itineraryData.flight?.returnStops ?? 0,
+      cabin: itineraryData.returnFlight?.cabin || itineraryData.returnFlight?.travelClass || 'Economy',
+      placeholder: !itineraryData.returnFlight,
+      score: itineraryData.score_components?.flight,
+    });
+  }
+
+  const additional = (itineraryData.flightsOptions || [])
+    .filter((option) => option.id !== flights[0]?.id)
+    .slice(0, 2)
+    .map((option, index) => ({
+      id: option.id || `alt-${index}`,
+      type: 'Alternative',
+      airline: option.airline || 'Flight option',
+      flightNumber: option.flightNumber,
+      departure: option.departure,
+      arrival: option.arrival,
+      duration: option.duration,
+      price: option.price,
+      currency: option.currency || itineraryData.flight?.currency || 'USD',
+      stops: option.stops ?? 0,
+      cabin: option.cabin || option.travelClass || 'Economy',
+      score: option.score,
+    }));
+
+  return [...flights, ...additional];
+};
+
+const buildHotelCards = (itineraryData) => {
+  if (!itineraryData) return [];
+  const hotels = [];
+
+  if (itineraryData.hotel) {
+    hotels.push({
+      id: itineraryData.hotel.hotel_id || 'primary-hotel',
+      name: itineraryData.hotel.name || 'Accommodation',
+      location: itineraryData.hotel.location || itineraryData.hotel.address || '',
+      checkIn: itineraryData.hotel.checkIn || itineraryData.hotel.check_in,
+      checkOut: itineraryData.hotel.checkOut || itineraryData.hotel.check_out,
+      rating: itineraryData.hotel.rating || itineraryData.hotel.averageRating,
+      price: itineraryData.hotel.price ?? itineraryData.hotel.total_price ?? 0,
+      currency: itineraryData.hotel.currency || itineraryData.hotel.currencyCode || 'USD',
+      placeholder: Boolean(itineraryData.hotel.placeholder),
+      score: itineraryData.hotel.scores?.total,
+      breakdown: itineraryData.hotel.scores,
+    });
+  }
+
+  (itineraryData.hotelsData || [])
+    .filter((hotel) => hotel.hotel_id !== hotels[0]?.id)
+    .slice(0, hotels.length ? 1 : 2)
+    .forEach((hotel, index) => {
+      hotels.push({
+        id: hotel.hotel_id || `additional-hotel-${index}`,
+        name: hotel.name || 'Hotel option',
+        location: hotel.location || hotel.address || '',
+        checkIn: hotel.checkIn || hotel.check_in,
+        checkOut: hotel.checkOut || hotel.check_out,
+        rating: hotel.rating || hotel.averageRating,
+        price: hotel.price ?? hotel.total_price ?? 0,
+      currency: hotel.currency || hotel.currencyCode || itineraryData.hotel?.currency || 'USD',
+        placeholder: Boolean(hotel.placeholder),
+      score: hotel.scores?.total,
+      breakdown: hotel.scores,
+      });
+    });
+
+  return hotels;
+};
+
+const buildCostBreakdown = (itineraryData) => {
+  if (!itineraryData) {
+    return {
+      total: 0,
+      items: [],
+      currency: 'USD',
+    };
+  }
+
+  const flightCost = itineraryData.flight?.price ?? itineraryData.flight?.basePrice ?? 0;
+  const hotelCost = itineraryData.hotel?.price ?? itineraryData.hotel?.total_price ?? 0;
+  const activityCost =
+    (typeof itineraryData.activity?.price === 'object'
+      ? itineraryData.activity?.price?.amount
+      : itineraryData.activity?.price) ?? 0;
+
+  const flightCurrency = itineraryData.flight?.currency || 'USD';
+  const hotelCurrency = itineraryData.hotel?.currency || itineraryData.hotel?.currencyCode || flightCurrency;
+  const activityCurrency =
+    (typeof itineraryData.activity?.price === 'object' && itineraryData.activity?.price?.currencyCode) ||
+    itineraryData.activity?.currency ||
+    flightCurrency;
+
+  const subtotal = flightCost + hotelCost + activityCost;
+  const total = itineraryData.total_price ?? subtotal;
+  const totalCurrency = itineraryData.currency || flightCurrency || hotelCurrency || activityCurrency || 'USD';
+
+  return {
+    total,
+    currency: totalCurrency,
+    items: [
+      { label: 'Flights', value: flightCost, currency: flightCurrency },
+      { label: 'Accommodation', value: hotelCost, currency: hotelCurrency },
+      { label: 'Activities', value: activityCost, currency: activityCurrency },
+    ],
+  };
+};
+
+const buildSummary = (itineraryData, routeInfo, flightsForScore) => {
+  if (!itineraryData) {
+    return {
+      totalCost: 0,
+      totalDuration: '—',
+      totalStops: 0,
+      convenience: 0,
+      tripLength: 0,
+      currency: 'USD',
+    };
+  }
+
+  const duration = itineraryData.flight?.duration
+    ? formatDurationLabel(itineraryData.flight.duration)
+    : '—';
+  const stops = itineraryData.flight?.stops ?? 0;
+  const totalCost = itineraryData.total_price ?? buildCostBreakdown(itineraryData).total;
+  const currency =
+    itineraryData.currency ||
+    itineraryData.flight?.currency ||
+    itineraryData.hotel?.currency ||
+    itineraryData.hotel?.currencyCode ||
+    'USD';
+
+  const flightsForCalculation =
+    flightsForScore.length > 0
+      ? flightsForScore
+      : itineraryData.flight
+      ? [itineraryData.flight]
+      : [];
+  const maxPrice = Math.max(
+    totalCost,
+    ...flightsForCalculation.map((flight) => Number(flight.price) || 0),
+    0,
+  );
+  const convenience = calculateConvenienceScore(flightsForCalculation, totalCost, maxPrice);
+
+  const tripLength = itineraryData.days?.length || (routeInfo?.returnDate ? null : 0);
+  const totalScore = itineraryData.total_score ?? 0;
+  const weights = itineraryData.weights
+    ? normalizePreferenceWeights(itineraryData.weights)
+    : null;
+  const weightSummary =
+    itineraryData.weight_summary ||
+    (weights ? formatWeightSummary(weights) : '');
+  const scoreComponents = itineraryData.score_components || {};
+
+  return {
+    totalCost,
+    totalDuration: duration,
+    totalStops: stops,
+    convenience,
+    tripLength,
+    currency,
+    totalScore,
+    weightSummary,
+    weights,
+    scoreComponents,
+  };
+};
+
+const buildStatusMessage = (hotelsData, activitiesData) => {
+  if (!hotelsData?.length && !activitiesData?.length) {
+    return 'We could not retrieve hotels or activities from Amadeus for these travel dates. Placeholder entries are shown so you can still review the itinerary.';
+  }
+  if (!hotelsData?.length) {
+    return 'We could not retrieve hotels from Amadeus for these travel dates. Accommodation details are placeholders for now.';
+  }
+  if (!activitiesData?.length) {
+    return 'We could not retrieve activities from Amadeus for these travel dates. Feel free to add your own experiences.';
+  }
+  return null;
 };
 
 export default function OptimizedItinerary() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [loading, setLoading] = useState(true);
-  const [itineraryData, setItineraryData] = useState(null);
-  const [error, setError] = useState(null);
-  const [expandedDays, setExpandedDays] = useState(new Set([1]));
-  const [expandedItems, setExpandedItems] = useState(new Set());
-  const [showPreferencesModal, setShowPreferencesModal] = useState(false);
-  
-  // Get preferences from location state or localStorage, with defaults
-  const getInitialPreferences = () => {
-    // First try from location state
-    if (location.state?.preferences?.preferences) {
-      return location.state.preferences.preferences;
-    }
-    // Try localStorage
-    try {
-      const stored = localStorage.getItem('travelPreferences');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.preferences) {
-          return parsed.preferences;
-        }
-      }
-    } catch (e) {
-      console.log('Could not load preferences from localStorage:', e);
-    }
-    // Default: equal weighting
-    return { budget: 0.33, quality: 0.33, convenience: 0.34 };
-  };
-  
-  const [preferences, setPreferences] = useState(getInitialPreferences());
 
-  // Get route info from location state or default
-  const routeInfo = location.state?.routeInfo || {
+  const [preferences, setPreferences] = useState(() => loadStoredPreferences(location.state));
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [itineraryData, setItineraryData] = useState(null);
+  const [statusMessage, setStatusMessage] = useState(null);
+  const [showPreferencesModal, setShowPreferencesModal] = useState(false);
+  const [conversionRates, setConversionRates] = useState({});
+
+  const routeInfo = useMemo(
+    () =>
+      location.state?.routeInfo || {
     departure: 'New York',
     destination: 'Tokyo',
     departureCode: 'JFK',
     destinationCode: 'NRT',
-    date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-    returnDate: null
-  };
+        date: new Date().toISOString(),
+        returnDate: null,
+      },
+    [location.state],
+  );
 
+  const allFlights = useMemo(() => {
   const flights = location.state?.flights || [];
   const outboundFlights = location.state?.outboundFlights || [];
   const returnFlights = location.state?.returnFlights || [];
-  const allFlights = [...outboundFlights, ...returnFlights].length > 0 
-    ? [...outboundFlights, ...returnFlights] 
-    : flights;
+    if (outboundFlights.length || returnFlights.length) {
+      return [...outboundFlights, ...returnFlights];
+    }
+    return flights;
+  }, [location.state]);
 
   const generateItinerary = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
-      console.log('Starting itinerary generation with routeInfo:', routeInfo);
-      console.log('Available flights:', allFlights);
-
-      // Validate routeInfo
       if (!routeInfo.destination && !routeInfo.destinationCode) {
-        throw new Error('Destination information is missing. Please go back and search for flights again.');
+        throw new Error('Destination information is missing. Please return to the flight results and try again.');
       }
 
-      const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-      const base = isLocalhost 
+      const isLocalhost =
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1';
+      const apiBase = isLocalhost
         ? 'http://localhost:8000'
-        : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
+        : process.env.REACT_APP_API_BASE || 'http://localhost:8000';
 
-      // Parse dates from routeInfo
       const departureDate = parseDate(routeInfo.date || routeInfo.departure_display);
-      const returnDate = routeInfo.returnDate || routeInfo.return_display ? parseDate(routeInfo.returnDate || routeInfo.return_display) : null;
-      
-      // Calculate check-in and check-out dates
-      const checkInDate = departureDate.toISOString().split('T')[0];
-      const checkOutDate = returnDate ? returnDate.toISOString().split('T')[0] : 
-        new Date(departureDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const returnDate = routeInfo.returnDate || routeInfo.return_display
+        ? parseDate(routeInfo.returnDate || routeInfo.return_display)
+        : new Date(departureDate.getTime() + 6 * 24 * 60 * 60 * 1000);
 
-      // First, fetch hotels and activities
-      console.log('Fetching itinerary data with:', {
-        destinationCode: routeInfo.destinationCode,
-        destinationName: routeInfo.destination,
-        checkIn: checkInDate,
-        checkOut: checkOutDate
-      });
+      const flightsPayload = (allFlights.length ? allFlights : []).map((flight) => ({
+        id: flight.id || flight.flightNumber || `flight-${Math.random()}`,
+        price: flight.price || 0,
+        duration: flight.duration || flight._duration || '0h',
+        airline: flight.airline || 'Unknown carrier',
+        flightNumber: flight.flightNumber || '',
+        departure: flight.departure || flight.departureCode || routeInfo.departureCode,
+        arrival: flight.arrival || flight.arrivalCode || routeInfo.destinationCode,
+        stops: flight.stops ?? 0,
+        currency: flight.currency || flight.currencyCode || 'USD',
+      }));
 
-      const dataResponse = await fetch(`${base}/api/fetchItineraryData`, {
+      if (!flightsPayload.length && routeInfo.departure && routeInfo.destination) {
+        flightsPayload.push({
+          id: 'placeholder-flight',
+          price: 600,
+          duration: 'PT6H30M',
+          airline: 'Sample Airline',
+          flightNumber: 'SA123',
+          departure: routeInfo.departureCode || routeInfo.departure,
+          arrival: routeInfo.destinationCode || routeInfo.destination,
+          stops: 0,
+          currency: 'USD',
+        });
+      }
+
+      const preferencesPayload = normalizePreferenceWeights(preferences);
+
+      const itineraryDataResponse = await fetch(`${apiBase}/api/fetchItineraryData`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           destinationCode: routeInfo.destinationCode || routeInfo.destination,
           destinationName: routeInfo.destination || routeInfo.destinationCode,
-          checkIn: checkInDate,
-          checkOut: checkOutDate,
-          adults: 1
-        })
+          checkIn: departureDate.toISOString().split('T')[0],
+          checkOut: returnDate.toISOString().split('T')[0],
+          adults: 1,
+        }),
       });
 
-      if (!dataResponse.ok) {
-        const errorText = await dataResponse.text();
-        console.error('fetchItineraryData error:', errorText);
-        throw new Error(`Failed to fetch hotels and activities: ${dataResponse.status} ${errorText}`);
+      if (!itineraryDataResponse.ok) {
+        const text = await itineraryDataResponse.text();
+        throw new Error(`Failed to fetch hotels and experiences: ${itineraryDataResponse.status} ${text}`);
       }
 
-      const dataResult = await dataResponse.json();
-      console.log('fetchItineraryData result:', dataResult);
-      
-      if (!dataResult.ok) {
-        throw new Error(dataResult.error || 'Failed to fetch hotels and activities');
+      const itineraryDataJson = await itineraryDataResponse.json();
+      if (!itineraryDataJson.ok) {
+        throw new Error(itineraryDataJson.error || 'Unable to retrieve hotels and activities.');
       }
 
-      const hotelsData = dataResult.hotels || [];
-      const activitiesData = dataResult.activities || [];
-      
-      console.log(`Fetched ${hotelsData.length} hotels and ${activitiesData.length} activities`);
+      const hotelsData = itineraryDataJson.hotels || [];
+      const activitiesData = itineraryDataJson.activities || [];
 
-      // Prepare flights data
-      const flightsData = allFlights.length > 0 ? allFlights.map(flight => ({
-        id: flight.id || flight.flightNumber || `flight-${Math.random()}`,
-        price: flight.price || 0,
-        duration: flight.duration || '0h',
-        airline: flight.airline || 'Unknown',
-        flightNumber: flight.flightNumber || '',
-        departure: flight.departure || '',
-        arrival: flight.arrival || '',
-        stops: flight.stops || 0
-      })) : [];
-
-      // If no flights provided, create a dummy flight from routeInfo
-      if (flightsData.length === 0 && routeInfo.departure && routeInfo.destination) {
-        console.warn('No flights provided, creating dummy flight from routeInfo');
-        flightsData.push({
-          id: 'dummy-flight',
-          price: 500,
-          duration: '5h',
-          airline: 'Airline',
-          flightNumber: 'FL123',
-          departure: routeInfo.departureCode || routeInfo.departure,
-          arrival: routeInfo.destinationCode || routeInfo.destination,
-          stops: 0
-        });
-      }
-
-      // Format preferences for backend - backend expects {budget, quality, convenience} as floats
-      const formattedPreferences = {
-        budget: typeof preferences.budget === 'number' ? preferences.budget : parseFloat(preferences.budget) || 0.33,
-        quality: typeof preferences.quality === 'number' ? preferences.quality : parseFloat(preferences.quality) || 0.33,
-        convenience: typeof preferences.convenience === 'number' ? preferences.convenience : parseFloat(preferences.convenience) || 0.34
-      };
-
-      // Generate optimal itinerary with user preferences
-      console.log('Generating optimal itinerary with:', {
-        flightsCount: flightsData.length,
-        hotelsCount: hotelsData.length,
-        activitiesCount: activitiesData.length,
-        preferences: formattedPreferences
-      });
-
-      const itineraryResponse = await fetch(`${base}/api/generateOptimalItinerary`, {
+      const optimalResponse = await fetch(`${apiBase}/api/generateOptimalItinerary`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          flights: flightsData,
+          flights: flightsPayload,
           hotels: hotelsData,
           activities: activitiesData,
-          preferences: formattedPreferences,
-          userBudget: 5000 // Default budget
-        })
+          preferences: preferencesPayload,
+          userBudget: 5000,
+        }),
       });
 
-      if (!itineraryResponse.ok) {
-        const errorText = await itineraryResponse.text();
-        console.error('generateOptimalItinerary error:', errorText);
-        throw new Error(`Failed to generate itinerary: ${itineraryResponse.status} ${errorText}`);
+      if (!optimalResponse.ok) {
+        const text = await optimalResponse.text();
+        throw new Error(`Failed to generate itinerary: ${optimalResponse.status} ${text}`);
       }
 
-      const result = await itineraryResponse.json();
-      console.log('generateOptimalItinerary result:', result);
-      
-      if (!result.ok) {
-        throw new Error(result.error || 'Failed to generate itinerary');
+      const optimalJson = await optimalResponse.json();
+      if (!optimalJson.ok) {
+        throw new Error(optimalJson.error || 'Unable to generate itinerary with the supplied data.');
       }
 
-      // Create day-by-day itinerary structure
       const days = createDayByDayItinerary(
-        result.flight,
-        result.hotel,
-        result.activity ? [result.activity] : [],
+        optimalJson.flight,
+        optimalJson.hotel,
+        optimalJson.activity ? [optimalJson.activity] : [],
         activitiesData,
         routeInfo,
         departureDate,
-        returnDate || checkOutDate
+        returnDate,
       );
 
       setItineraryData({
-        ...result,
-        days: days,
-        routeInfo: routeInfo,
-        hotelsData: hotelsData,
-        activitiesData: activitiesData
+        ...optimalJson,
+        hotelsData,
+        activitiesData,
+        flightsOptions: flightsPayload,
+        routeInfo,
+        days,
       });
+
+      setStatusMessage(buildStatusMessage(hotelsData, activitiesData));
     } catch (err) {
-      console.error('Error generating itinerary:', err);
+      console.error('Itinerary generation failed', err);
       setError(err.message || 'Failed to generate itinerary. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [preferences, allFlights, routeInfo]);
+  }, [allFlights, preferences, routeInfo]);
 
   useEffect(() => {
     generateItinerary();
   }, [generateItinerary]);
 
-  const createDayByDayItinerary = (flight, hotel, selectedActivity, allActivities, routeInfo, startDate, endDate) => {
-    const days = [];
-    const endDateObj = parseDate(endDate);
-    const daysDiff = Math.ceil((endDateObj - startDate) / (1000 * 60 * 60 * 24)) || 1;
-    
-    // Day 1: Outbound flight + arrival
-    days.push({
-      day: 1,
-      date: formatDate(startDate),
-      dateObj: startDate,
-      items: [
-        {
-          type: 'flight',
-          title: `${flight?.airline || 'Flight'} ${flight?.flightNumber || ''}`,
-          time: flight?.departure || 'TBD',
-          details: {
-            departure: flight?.departure || routeInfo.departureCode,
-            arrival: flight?.arrival || routeInfo.destinationCode,
-            duration: flight?.duration ? (typeof flight.duration === 'number' ? `${flight.duration.toFixed(1)}h` : flight.duration) : 'N/A',
-            stops: flight?.stops || 0,
-            price: flight?.price || 0,
-            airline: flight?.airline,
-            flightNumber: flight?.flightNumber
-          }
-        },
-        {
-          type: 'hotel',
-          title: hotel?.name || 'Hotel',
-          time: 'Check-in',
-          details: {
-            location: hotel?.location || routeInfo.destination,
-            distance: hotel?.distance || 0,
-            rating: hotel?.rating || 0,
-            price: hotel?.price || 0,
-            name: hotel?.name
-          }
-        }
-      ]
+  const flightCards = useMemo(() => buildFlightCards(itineraryData, routeInfo), [itineraryData, routeInfo]);
+  const hotelCards = useMemo(() => buildHotelCards(itineraryData), [itineraryData]);
+  const costSummary = useMemo(
+    () => buildCostBreakdown(itineraryData),
+    [itineraryData],
+  );
+  const summaryMetrics = useMemo(
+    () => buildSummary(itineraryData, routeInfo, flightCards),
+    [itineraryData, routeInfo, flightCards],
+  );
+  const tripLength = itineraryData?.days?.length || 0;
+  const displayedCurrencies = useMemo(() => {
+    const codes = new Set();
+    flightCards.forEach((flight) => {
+      if (flight?.currency) codes.add(flight.currency);
     });
-
-    // Middle days: Activities
-    for (let i = 1; i < daysDiff; i++) {
-      const currentDate = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
-      const dayActivities = allActivities.slice(i * 2 - 1, i * 2 + 1); // 2 activities per day
-      
-      const dayItems = [];
-      
-      if (dayActivities.length > 0) {
-        dayActivities.forEach((activity, idx) => {
-          dayItems.push({
-            type: 'activity',
-            title: activity.name || 'Activity',
-            time: idx === 0 ? 'Morning' : 'Afternoon',
-            details: {
-              description: activity.description || activity.shortDescription || '',
-              duration: activity.minimumDuration || activity.duration || 'N/A',
-              rating: activity.rating || 0,
-              price: activity.price?.amount || activity.price || 0,
-              location: activity.geoCode ? `${activity.geoCode.latitude}, ${activity.geoCode.longitude}` : ''
-            }
-          });
-        });
-      }
-      
-      // Add hotel stay
-      dayItems.push({
-        type: 'hotel',
-        title: hotel?.name || 'Hotel',
-        time: 'Overnight',
-        details: {
-          location: hotel?.location || routeInfo.destination,
-          distance: hotel?.distance || 0,
-          rating: hotel?.rating || 0,
-          price: hotel?.price || 0,
-          name: hotel?.name
-        }
+    hotelCards.forEach((hotel) => {
+      if (hotel?.currency) codes.add(hotel.currency);
+    });
+    if (itineraryData?.flight?.currency) codes.add(itineraryData.flight.currency);
+    if (itineraryData?.hotel?.currency) codes.add(itineraryData.hotel.currency);
+    if (itineraryData?.activity?.currency) codes.add(itineraryData.activity.currency);
+    if (costSummary?.currency) codes.add(costSummary.currency);
+    costSummary?.items?.forEach((item) => {
+      if (item?.currency) codes.add(item.currency);
+    });
+    itineraryData?.days?.forEach((day) => {
+      day.items?.forEach((item) => {
+        if (item?.meta?.currency) codes.add(item.meta.currency);
       });
-      
-      days.push({
-        day: i + 1,
-        date: formatDate(currentDate),
-        dateObj: currentDate,
-        items: dayItems
-      });
-    }
+    });
+    return Array.from(codes);
+  }, [flightCards, hotelCards, costSummary, itineraryData]);
+  useEffect(() => {
+    if (!displayedCurrencies.length) return;
+    const currenciesToFetch = displayedCurrencies.filter(
+      (code) => code && code !== 'USD' && !conversionRates[code],
+    );
+    if (!currenciesToFetch.length) return;
 
-    // Last day: Return flight (if return date exists and is different from start date)
-    if (endDate && endDateObj && endDateObj > startDate) {
-      days.push({
-        day: days.length + 1,
-        date: formatDate(endDateObj),
-        dateObj: endDateObj,
-        items: [
-          {
-            type: 'flight',
-            title: 'Return Flight',
-            time: 'TBD',
-            details: {
-              departure: routeInfo.destinationCode,
-              arrival: routeInfo.departureCode,
-              duration: 'TBD',
-              stops: 0,
-              price: 0
+    let cancelled = false;
+
+    const fetchRates = async () => {
+      const updates = {};
+      await Promise.all(
+        currenciesToFetch.map(async (code) => {
+          try {
+            const response = await fetch(`https://api.exchangerate.host/latest?base=${code}&symbols=USD`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const rate = data?.rates?.USD;
+            if (typeof rate === 'number' && rate > 0) {
+              updates[code] = rate;
             }
+          } catch (err) {
+            console.warn(`Unable to fetch conversion rate for ${code}:`, err);
           }
-        ]
-      });
-    }
+        }),
+      );
 
-    return days;
-  };
+      if (!cancelled && Object.keys(updates).length) {
+        setConversionRates((prev) => ({ ...prev, ...updates }));
+      }
+    };
 
-  const toggleDay = (day) => {
-    const newExpanded = new Set(expandedDays);
-    if (newExpanded.has(day)) {
-      newExpanded.delete(day);
-    } else {
-      newExpanded.add(day);
-    }
-    setExpandedDays(newExpanded);
-  };
+    fetchRates();
 
-  const toggleItem = (day, itemIndex) => {
-    const key = `${day}-${itemIndex}`;
-    const newExpanded = new Set(expandedItems);
-    if (newExpanded.has(key)) {
-      newExpanded.delete(key);
-    } else {
-      newExpanded.add(key);
-    }
-    setExpandedItems(newExpanded);
-  };
+    return () => {
+      cancelled = true;
+    };
+  }, [displayedCurrencies, conversionRates]);
+  const renderPrice = useCallback(
+    (amount, currency = 'USD') => {
+      const primary = formatCurrency(amount, currency);
+      if (!currency || currency === 'USD') {
+        return primary;
+      }
+
+      const rate = conversionRates[currency];
+      if (rate) {
+        const converted = formatCurrency(amount * rate, 'USD');
+        return `${primary} (${converted})`;
+      }
+
+      return primary;
+    },
+    [conversionRates],
+  );
 
   if (loading) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        height: '100vh',
-        flexDirection: 'column',
-        gap: '16px',
-        background: 'linear-gradient(to bottom, #EAF9FF 0%, #ffffff 100%)'
-      }}>
-        <div style={{ fontSize: '48px' }}>✈️</div>
-        <div style={{ fontSize: '20px', color: '#004C8C', fontWeight: 600 }}>Generating your optimized itinerary...</div>
-        <div style={{ fontSize: '14px', color: '#64748b' }}>This may take a moment</div>
+      <div className="itinerary-page">
+        <div className="loading-state">
+          <div className="loading-card">
+            <div className="loading-title">Generating your itinerary…</div>
+            <div className="loading-text">
+              We are ranking flights, accommodations, and activities according to your preferences.
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <ScrollArea className="h-full">
-        <div style={{ padding: '24px', maxWidth: '1200px', margin: '0 auto' }}>
-          <div style={{ 
-            padding: '24px', 
-            backgroundColor: '#fee2e2', 
-            borderRadius: '12px', 
-            border: '1px solid #fca5a5',
-            marginBottom: '24px'
-          }}>
-            <h2 style={{ color: '#dc2626', marginBottom: '8px' }}>Error</h2>
-            <p style={{ color: '#991b1b' }}>{error}</p>
-          </div>
+      <div className="itinerary-page">
+        <div className="error-state">
+          <div className="error-card">
+            <div className="error-title">We ran into a problem</div>
+            <div className="error-text">{error}</div>
+            <div className="modal-actions" style={{ marginTop: '24px' }}>
           <button
+                type="button"
+                className="itinerary-button secondary"
             onClick={() => navigate(-1)}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: '#00ADEF',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '16px',
-              fontWeight: 600
-            }}
-          >
-            Back to Search Results
+              >
+                Back to flight results
+              </button>
+              <button
+                type="button"
+                className="itinerary-button primary"
+                onClick={generateItinerary}
+              >
+                Try again
           </button>
         </div>
-      </ScrollArea>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -470,885 +752,474 @@ export default function OptimizedItinerary() {
     return null;
   }
 
-  const { flight, hotel, activity, days, total_price } = itineraryData;
-  const totalDuration = parseDuration(flight?.duration || '0h');
-  const totalStops = flight?.stops || 0;
-  const maxPrice = Math.max(...allFlights.map(f => f.price || 0), total_price || 0, 2000);
-  const convenienceScore = calculateConvenienceScore(
-    [flight],
-    total_price || 0,
-    maxPrice
-  );
-
-  // Calculate total costs
-  const flightCost = flight?.price || 0;
-  const hotelCost = hotel?.price || 0;
-  const activityCost = activity?.price?.amount || activity?.price || 0;
-  const totalCost = total_price || (flightCost + hotelCost + activityCost);
-
-  // Prepare chart data for summary
-  const summaryChartData = [
-    { name: 'Cost', value: totalCost, max: maxPrice },
-    { name: 'Duration', value: totalDuration, max: 24 },
-    { name: 'Stops', value: totalStops, max: 4 },
-    { name: 'Convenience', value: convenienceScore, max: 100 }
-  ];
-
   return (
-    <div style={{ minHeight: '100vh', background: 'linear-gradient(to bottom, #EAF9FF 0%, #ffffff 100%)' }}>
-      <ScrollArea className="h-full">
-        <div style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto' }}>
-          {/* Header */}
-          <div style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            marginBottom: '32px',
-            flexWrap: 'wrap',
-            gap: '16px'
-          }}>
-            <div>
-              <h1 style={{ 
-                fontSize: '36px', 
-                fontWeight: 700, 
-                color: '#004C8C',
-                marginBottom: '8px'
-              }}>
-                Optimized Itinerary
-              </h1>
-              <p style={{ color: '#64748b', fontSize: '18px' }}>
-                {routeInfo.departure} → {routeInfo.destination} • {routeInfo.date}
-                {routeInfo.returnDate ? ` - ${routeInfo.returnDate}` : ''}
-              </p>
-            </div>
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-              <button
-                onClick={() => setShowPreferencesModal(true)}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: 'white',
-                  color: '#004C8C',
-                  border: '2px solid #004C8C',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  fontWeight: 600,
-                  transition: 'all 0.2s'
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.backgroundColor = '#f0f9ff';
-                  e.target.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.backgroundColor = 'white';
-                  e.target.style.transform = 'translateY(0)';
-                }}
-              >
-                Preferences
-              </button>
-              <button
-                onClick={() => navigate(-1)}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: 'white',
-                  color: '#00ADEF',
-                  border: '2px solid #00ADEF',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  fontWeight: 600,
-                  transition: 'all 0.2s'
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.backgroundColor = '#E6F7FF';
-                  e.target.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.backgroundColor = 'white';
-                  e.target.style.transform = 'translateY(0)';
-                }}
-              >
-                Back to Results
-              </button>
-              <button
-                onClick={generateItinerary}
-                style={{
-                  padding: '12px 24px',
-                  backgroundColor: '#00ADEF',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  fontWeight: 600,
-                  transition: 'all 0.2s',
-                  boxShadow: '0 2px 4px rgba(0, 173, 239, 0.3)'
-                }}
-                onMouseEnter={(e) => {
-                  e.target.style.backgroundColor = '#006AAF';
-                  e.target.style.transform = 'translateY(-1px)';
-                  e.target.style.boxShadow = '0 4px 8px rgba(0, 173, 239, 0.4)';
-                }}
-                onMouseLeave={(e) => {
-                  e.target.style.backgroundColor = '#00ADEF';
-                  e.target.style.transform = 'translateY(0)';
-                  e.target.style.boxShadow = '0 2px 4px rgba(0, 173, 239, 0.3)';
-                }}
-              >
-                Re-optimize
-              </button>
-            </div>
-          </div>
+    <div className="itinerary-page">
+      <ScrollArea className="itinerary-scroll">
+        <div className="itinerary-container">
+          <HeaderBar
+            onBack={() => navigate(-1)}
+            onReoptimize={generateItinerary}
+            onOpenPreferences={() => setShowPreferencesModal(true)}
+          />
 
-          {/* Preferences Display */}
-          <div style={{
-            backgroundColor: '#f0f9ff',
-            borderRadius: '12px',
-            padding: '20px',
-            marginBottom: '24px',
-            border: '1px solid #bae6fd'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
-              <div>
-                <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Optimization Weights</div>
-                <div style={{ display: 'flex', gap: '32px', fontSize: '16px', flexWrap: 'wrap' }}>
-                  <div>
-                    <span style={{ color: '#004C8C', fontWeight: 500 }}>Budget: </span>
-                    <span style={{ color: '#00ADEF', fontWeight: 700 }}>{(preferences.budget * 100).toFixed(0)}%</span>
-                  </div>
-                  <div>
-                    <span style={{ color: '#004C8C', fontWeight: 500 }}>Quality: </span>
-                    <span style={{ color: '#00ADEF', fontWeight: 700 }}>{(preferences.quality * 100).toFixed(0)}%</span>
-                  </div>
-                  <div>
-                    <span style={{ color: '#004C8C', fontWeight: 500 }}>Convenience: </span>
-                    <span style={{ color: '#00ADEF', fontWeight: 700 }}>{(preferences.convenience * 100).toFixed(0)}%</span>
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowPreferencesModal(true)}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: 'white',
-                  color: '#00ADEF',
-                  border: '1px solid #00ADEF',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: 500
-                }}
-              >
-                Edit
-              </button>
-            </div>
-          </div>
+          <SummaryPanel
+            destination={routeInfo.destination || routeInfo.destinationCode}
+            dateRange={formatDateRange(routeInfo.date, routeInfo.returnDate)}
+            tripLength={tripLength}
+            summary={summaryMetrics}
+            weightSummary={summaryMetrics.weightSummary}
+            renderPrice={renderPrice}
+          />
 
-          {/* Summary Section */}
-          <div style={{
-            backgroundColor: 'white',
-            borderRadius: '16px',
-            padding: '32px',
-            marginBottom: '32px',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-            border: '1px solid #e2e8f0'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
-              <h2 style={{ 
-                fontSize: '28px', 
-                fontWeight: 700, 
-                color: '#004C8C',
-                margin: 0
-              }}>
-                Trip Summary
-              </h2>
-              {itineraryData?.total_score && (
-                <div style={{
-                  padding: '12px 20px',
-                  backgroundColor: '#f0f9ff',
-                  borderRadius: '12px',
-                  border: '2px solid #bae6fd'
-                }}>
-                  <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '4px', fontWeight: 500 }}>Optimization Score</div>
-                  <div style={{ fontSize: '28px', fontWeight: 700, color: '#00ADEF' }}>
-                    {Math.round(itineraryData.total_score * 100)}%
-                  </div>
-                </div>
-              )}
-            </div>
-            <div style={{ 
-              display: 'grid', 
-              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-              gap: '24px',
-              marginBottom: '32px'
-            }}>
-              <div style={{ padding: '20px', backgroundColor: '#f8fafc', borderRadius: '12px' }}>
-                <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Total Cost</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: '#00ADEF' }}>
-                  ${totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </div>
-                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
-                  Flights: ${flightCost.toFixed(2)} • Hotels: ${hotelCost.toFixed(2)} • Activities: ${activityCost.toFixed(2)}
-                </div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#f8fafc', borderRadius: '12px' }}>
-                <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Total Travel Time</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: '#00ADEF' }}>
-                  {totalDuration.toFixed(1)}h
-                </div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#f8fafc', borderRadius: '12px' }}>
-                <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Number of Stops</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: '#00ADEF' }}>
-                  {totalStops}
-                </div>
-                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
-                  {totalStops === 0 ? 'Non-stop flight' : `${totalStops} stop${totalStops > 1 ? 's' : ''}`}
-                </div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#f8fafc', borderRadius: '12px' }}>
-                <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Convenience Score</div>
-                <div style={{ fontSize: '32px', fontWeight: 700, color: '#00ADEF' }}>
-                  {convenienceScore}/100
-                </div>
-                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
-                  Based on duration, stops, and price
-                </div>
-              </div>
-            </div>
+          {statusMessage && <StatusBanner message={statusMessage} />}
 
-            {/* Summary Chart */}
-            <div style={{ height: '250px', marginTop: '24px' }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={summaryChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 12, fontWeight: 500 }} />
-                  <YAxis tick={{ fill: '#64748b', fontSize: 12 }} />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: 'white', 
-                      border: '1px solid #e2e8f0', 
-                      borderRadius: '8px',
-                      padding: '8px'
-                    }}
-                  />
-                  <Bar dataKey="value" fill="#00ADEF" radius={[8, 8, 0, 0]}>
-                    {summaryChartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill="#00ADEF" />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Day-by-Day Timeline */}
-          <div style={{ marginBottom: '32px' }}>
-            <h2 style={{ 
-              fontSize: '28px', 
-              fontWeight: 700, 
-              color: '#004C8C',
-              marginBottom: '24px'
-            }}>
-              Itinerary Timeline
-            </h2>
-            {days.map((day, dayIndex) => (
-              <DaySection
-                key={day.day}
-                day={day}
-                isExpanded={expandedDays.has(day.day)}
-                expandedItems={expandedItems}
-                onToggleDay={() => toggleDay(day.day)}
-                onToggleItem={(itemIndex) => toggleItem(day.day, itemIndex)}
+          <div className="itinerary-grid">
+            <div className="itinerary-column">
+              <FlightsSection
+                flights={flightCards}
+                weightSummary={summaryMetrics.weightSummary}
+                totalScore={summaryMetrics.totalScore}
+                renderPrice={renderPrice}
               />
-            ))}
-          </div>
+              <HotelsSection hotels={hotelCards} renderPrice={renderPrice} />
+              <ActivitiesSection days={itineraryData.days || []} renderPrice={renderPrice} />
         </div>
+
+            <div className="itinerary-column">
+              <CostSidebar
+                cost={costSummary}
+                weightSummary={summaryMetrics.weightSummary}
+                totalScore={summaryMetrics.totalScore}
+                scoreComponents={summaryMetrics.scoreComponents}
+                renderPrice={renderPrice}
+              />
+              <PreferencesPanel
+                preferences={preferences}
+                onEdit={() => setShowPreferencesModal(true)}
+              />
+              <div className="itinerary-card">
+                <div className="itinerary-card-header">
+                  <h2 className="itinerary-card-title">Insight</h2>
+                </div>
+                <p className="activity-meta">
+                  {itineraryData.insight ||
+                    `Weights (${formatWeightSummary(preferences)}) were applied across flights, accommodation, and activities to surface the best-fitting combination for your trip.`}
+                </p>
+                </div>
+                </div>
+              </div>
+            </div>
       </ScrollArea>
 
-      {/* Preferences Modal */}
       {showPreferencesModal && (
         <PreferencesModal
-          preferences={preferences}
-          onSave={(newPreferences) => {
-            setPreferences(newPreferences);
-            setShowPreferencesModal(false);
-            // Save to localStorage
-            try {
-              localStorage.setItem('travelPreferences', JSON.stringify({ preferences: newPreferences }));
-            } catch (e) {
-              console.log('Could not save preferences to localStorage:', e);
-            }
-            // Regenerate itinerary with new preferences - will be triggered by useEffect when preferences updates
-          }}
+          initialPreferences={preferences}
           onClose={() => setShowPreferencesModal(false)}
+          onSave={(nextPreferences) => {
+            const normalized = normalizePreferenceWeights(nextPreferences);
+            setPreferences(normalized);
+            storePreferences(normalized);
+            setShowPreferencesModal(false);
+            generateItinerary();
+          }}
         />
+            )}
+          </div>
+  );
+}
+
+function HeaderBar({ onBack, onReoptimize, onOpenPreferences }) {
+  return (
+    <header className="itinerary-header">
+      <div className="itinerary-brand">
+        <div className="itinerary-brand-icon">✈️</div>
+            <div>
+          <div className="itinerary-brand-title">Optimized Itinerary</div>
+          <div className="itinerary-card-subtitle">
+            Ranked in real-time using your budget, quality, and convenience preferences.
+              </div>
+            </div>
+              </div>
+      <div className="itinerary-actions">
+        <button type="button" className="itinerary-button secondary" onClick={onOpenPreferences}>
+          Adjust preferences
+        </button>
+        <button type="button" className="itinerary-button secondary" onClick={onBack}>
+          Back to results
+        </button>
+        <button type="button" className="itinerary-button primary" onClick={onReoptimize}>
+          Re-optimize
+        </button>
+            </div>
+    </header>
+  );
+}
+
+function SummaryPanel({ destination, dateRange, tripLength, summary, weightSummary, renderPrice }) {
+  return (
+    <section className="itinerary-summary">
+      <div className="itinerary-summary-header">
+            <div>
+          <div className="itinerary-summary-destination">
+            {destination || 'Selected destination'}
+              </div>
+          <div className="itinerary-summary-dates">
+            {dateRange || 'Flexible dates'} {tripLength ? `• ${tripLength} days` : ''}
+            </div>
+          {weightSummary ? (
+            <div className="activity-meta">Optimised with {weightSummary}</div>
+          ) : null}
+              </div>
+            </div>
+      <div className="itinerary-summary-grid">
+        <SummaryTile
+          label="Total investment"
+          value={renderPrice(summary.totalCost, summary.currency)}
+        />
+        <SummaryTile
+          label="Overall score"
+          value={`${summary.totalScore.toFixed(1)}/100`}
+          subtext={weightSummary}
+        />
+        <SummaryTile label="Total travel time" value={summary.totalDuration || '—'} />
+        <SummaryTile label="Total stops" value={summary.totalStops ?? 0} />
+        <SummaryTile label="Convenience score" value={`${summary.convenience}/100`} />
+          </div>
+    </section>
+  );
+}
+
+function SummaryTile({ label, value, subtext }) {
+  return (
+    <div className="itinerary-summary-tile">
+      <div className="itinerary-summary-label">{label}</div>
+      <div className="itinerary-summary-value">{value}</div>
+      {subtext ? <div className="oi-summary-subtext">{subtext}</div> : null}
+    </div>
+  );
+}
+
+function FlightsSection({ flights, weightSummary, totalScore, renderPrice }) {
+  return (
+    <section className="itinerary-card">
+      <div className="itinerary-card-header">
+        <div>
+          <div className="itinerary-card-title">Flights</div>
+          <div className="itinerary-card-subtitle">
+            Best scoring flight options matched to your preferences.
+          </div>
+          {weightSummary ? (
+            <div className="activity-meta">
+              Overall itinerary score {totalScore?.toFixed?.(1) || '—'}/100 • Weights: {weightSummary}
+            </div>
+          ) : null}
+        </div>
+          </div>
+      {flights.length === 0 ? (
+        <div className="empty-state">No flight options available for this search.</div>
+      ) : (
+        <div className="itinerary-column">
+          {flights.map((flight) => (
+            <div key={flight.id} className="flight-card">
+              <div className="flight-header">
+                <div>
+                  <div className="flight-airline">{flight.airline}</div>
+                  <div className="activity-meta">
+                    {flight.flightNumber ? `${flight.flightNumber} • ` : ''}
+                    {flight.cabin}
+        </div>
+                </div>
+                <div className="flight-tags">
+                  <span className="itinerary-tag">{flight.type}</span>
+                  <span className="itinerary-tag">
+                    {flight.stops === 0 ? 'Non-stop' : `${flight.stops} stop${flight.stops > 1 ? 's' : ''}`}
+            </span>
+                  {typeof flight.score === 'number' ? (
+                    <span className="itinerary-tag">Score {flight.score.toFixed(1)}/100</span>
+                  ) : null}
+          </div>
+        </div>
+              <div className="flight-route">
+            <div>
+                  <div className="flight-time">{flight.departure || '—'}</div>
+                  <div className="flight-airport">Departure</div>
+            </div>
+                <div className="flight-duration">
+                  <span>{formatDurationLabel(flight.duration)}</span>
+            </div>
+            <div>
+                  <div className="flight-time">{flight.arrival || '—'}</div>
+                  <div className="flight-airport">Arrival</div>
+            </div>
+          </div>
+              <div className="flight-price">{renderPrice(flight.price, flight.currency || 'USD')}</div>
+              {flight.placeholder && (
+                <div className="activity-meta">
+                  Return flight details will appear once the Amadeus API provides inventory for the selected range.
+        </div>
+              )}
+        </div>
+          ))}
+      </div>
+      )}
+    </section>
+  );
+}
+
+function HotelsSection({ hotels, renderPrice }) {
+  return (
+    <section className="itinerary-card">
+      <div className="itinerary-card-header">
+          <div>
+          <div className="itinerary-card-title">Accommodation</div>
+          <div className="itinerary-card-subtitle">
+            Lodging options near your activities, sorted by your quality and budget settings.
+            </div>
+            </div>
+          </div>
+      {hotels.length === 0 ? (
+        <div className="empty-state">No hotels were returned for the selected dates.</div>
+      ) : (
+        <div className="itinerary-column">
+          {hotels.map((hotel) => (
+            <div key={hotel.id} className="hotel-card">
+              <div className="hotel-header">
+                <div className="hotel-info">
+                  <div className="hotel-name">{hotel.name}</div>
+                  {hotel.location && <div className="hotel-meta">{hotel.location}</div>}
+                  {(hotel.checkIn || hotel.checkOut) && (
+                    <div className="hotel-meta">
+                      {hotel.checkIn ? `Check-in: ${hotel.checkIn}` : ''}
+                      {hotel.checkOut ? ` • Check-out: ${hotel.checkOut}` : ''}
+        </div>
+                  )}
+                  {hotel.rating && (
+                    <div className="hotel-meta">
+                      Rated {hotel.rating}/5 by recent travellers
+        </div>
+                  )}
+                </div>
+                <div className="hotel-price">{renderPrice(hotel.price, hotel.currency || 'USD')}</div>
+              </div>
+          {typeof hotel.score === 'number' ? (
+            <div className="activity-meta">Score {hotel.score.toFixed(1)}/100</div>
+          ) : null}
+              {hotel.placeholder && (
+                <div className="activity-meta">
+                  We&apos;ll populate concrete accommodation matches once the Amadeus API returns hotel offers for these dates.
+        </div>
       )}
     </div>
-  );
-}
-
-// Preferences Modal Component
-function PreferencesModal({ preferences, onSave, onClose }) {
-  const [budget, setBudget] = useState(Math.round(preferences.budget * 5));
-  const [quality, setQuality] = useState(Math.round(preferences.quality * 5));
-  const [convenience, setConvenience] = useState(Math.round(preferences.convenience * 5));
-
-  const normalizeWeights = (budgetVal, qualityVal, convenienceVal) => {
-    const total = budgetVal + qualityVal + convenienceVal;
-    if (total === 0) return { budget: 0.33, quality: 0.33, convenience: 0.34 };
-    return {
-      budget: budgetVal / total,
-      quality: qualityVal / total,
-      convenience: convenienceVal / total
-    };
-  };
-
-  const handleSave = () => {
-    const weights = normalizeWeights(budget, quality, convenience);
-    onSave(weights);
-  };
-
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 10000,
-        padding: '20px'
-      }}
-      onClick={onClose}
-    >
-      <div
-        style={{
-          backgroundColor: 'white',
-          borderRadius: '16px',
-          padding: '40px',
-          maxWidth: '600px',
-          width: '100%',
-          maxHeight: '90vh',
-          overflow: 'auto',
-          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
-          position: 'relative'
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          style={{
-            position: 'absolute',
-            top: '20px',
-            right: '20px',
-            background: 'none',
-            border: 'none',
-            fontSize: '28px',
-            cursor: 'pointer',
-            color: '#666',
-            padding: '4px 8px',
-            borderRadius: '4px',
-            transition: 'background-color 0.2s',
-            width: '36px',
-            height: '36px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          }}
-          onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'}
-          onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
-        >
-          ×
-        </button>
-
-        <h2 style={{ 
-          fontSize: '28px', 
-          fontWeight: 700, 
-          color: '#004C8C',
-          marginBottom: '8px',
-          marginTop: 0
-        }}>
-          Trip Preferences
-        </h2>
-        <p style={{ 
-          fontSize: '14px', 
-          color: '#64748b', 
-          marginBottom: '32px'
-        }}>
-          Adjust the importance of each factor (1 = least important, 5 = most important)
-        </p>
-
-        {/* Budget Slider */}
-        <div style={{ marginBottom: '32px' }}>
-          <div style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            marginBottom: '12px'
-          }}>
-            <label style={{ 
-              fontSize: '18px', 
-              fontWeight: 600, 
-              color: '#004C8C'
-            }}>
-              Budget
-            </label>
-            <span style={{ 
-              fontSize: '24px', 
-              fontWeight: 700, 
-              color: '#00ADEF',
-              minWidth: '40px',
-              textAlign: 'right'
-            }}>
-              {budget}
-            </span>
-          </div>
-          <input
-            type="range"
-            min="1"
-            max="5"
-            value={budget}
-            onChange={(e) => setBudget(parseInt(e.target.value))}
-            style={{
-              width: '100%',
-              height: '10px',
-              borderRadius: '5px',
-              background: `linear-gradient(to right, #00ADEF 0%, #00ADEF ${((budget - 1) / 4) * 100}%, #EAF9FF ${((budget - 1) / 4) * 100}%, #EAF9FF 100%)`,
-              outline: 'none',
-              WebkitAppearance: 'none',
-              cursor: 'pointer',
-            }}
-          />
-        </div>
-
-        {/* Quality Slider */}
-        <div style={{ marginBottom: '32px' }}>
-          <div style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            marginBottom: '12px'
-          }}>
-            <label style={{ 
-              fontSize: '18px', 
-              fontWeight: 600, 
-              color: '#004C8C'
-            }}>
-              Quality
-            </label>
-            <span style={{ 
-              fontSize: '24px', 
-              fontWeight: 700, 
-              color: '#00ADEF',
-              minWidth: '40px',
-              textAlign: 'right'
-            }}>
-              {quality}
-            </span>
-          </div>
-          <input
-            type="range"
-            min="1"
-            max="5"
-            value={quality}
-            onChange={(e) => setQuality(parseInt(e.target.value))}
-            style={{
-              width: '100%',
-              height: '10px',
-              borderRadius: '5px',
-              background: `linear-gradient(to right, #00ADEF 0%, #00ADEF ${((quality - 1) / 4) * 100}%, #EAF9FF ${((quality - 1) / 4) * 100}%, #EAF9FF 100%)`,
-              outline: 'none',
-              WebkitAppearance: 'none',
-              cursor: 'pointer',
-            }}
-          />
-        </div>
-
-        {/* Convenience Slider */}
-        <div style={{ marginBottom: '32px' }}>
-          <div style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            marginBottom: '12px'
-          }}>
-            <label style={{ 
-              fontSize: '18px', 
-              fontWeight: 600, 
-              color: '#004C8C'
-            }}>
-              Convenience
-            </label>
-            <span style={{ 
-              fontSize: '24px', 
-              fontWeight: 700, 
-              color: '#00ADEF',
-              minWidth: '40px',
-              textAlign: 'right'
-            }}>
-              {convenience}
-            </span>
-          </div>
-          <input
-            type="range"
-            min="1"
-            max="5"
-            value={convenience}
-            onChange={(e) => setConvenience(parseInt(e.target.value))}
-            style={{
-              width: '100%',
-              height: '10px',
-              borderRadius: '5px',
-              background: `linear-gradient(to right, #00ADEF 0%, #00ADEF ${((convenience - 1) / 4) * 100}%, #EAF9FF ${((convenience - 1) / 4) * 100}%, #EAF9FF 100%)`,
-              outline: 'none',
-              WebkitAppearance: 'none',
-              cursor: 'pointer',
-            }}
-          />
-        </div>
-
-        {/* Weight Display */}
-        <div style={{ 
-          marginBottom: '32px',
-          padding: '20px',
-          background: '#EAF9FF',
-          borderRadius: '12px'
-        }}>
-          <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '12px', fontWeight: 500 }}>
-            Normalized Weights:
-          </div>
-          <div style={{ display: 'flex', gap: '32px', fontSize: '18px', flexWrap: 'wrap' }}>
-            <div>
-              <span style={{ color: '#004C8C', fontWeight: 600 }}>Budget: </span>
-              <span style={{ color: '#00ADEF', fontWeight: 700 }}>
-                {(normalizeWeights(budget, quality, convenience).budget * 100).toFixed(1)}%
-              </span>
-            </div>
-            <div>
-              <span style={{ color: '#004C8C', fontWeight: 600 }}>Quality: </span>
-              <span style={{ color: '#00ADEF', fontWeight: 700 }}>
-                {(normalizeWeights(budget, quality, convenience).quality * 100).toFixed(1)}%
-              </span>
-            </div>
-            <div>
-              <span style={{ color: '#004C8C', fontWeight: 600 }}>Convenience: </span>
-              <span style={{ color: '#00ADEF', fontWeight: 700 }}>
-                {(normalizeWeights(budget, quality, convenience).convenience * 100).toFixed(1)}%
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Buttons */}
-        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-          <button
-            onClick={onClose}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: 'white',
-              color: '#64748b',
-              border: '1px solid #e2e8f0',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '16px',
-              fontWeight: 600
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            style={{
-              padding: '12px 24px',
-              backgroundColor: '#00ADEF',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '16px',
-              fontWeight: 600
-            }}
-          >
-            Apply & Re-optimize
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Day Section Component
-function DaySection({ day, isExpanded, expandedItems, onToggleDay, onToggleItem }) {
-  const getIcon = (type) => {
-    switch (type) {
-      case 'flight': return '✈️';
-      case 'hotel': return '🏨';
-      case 'activity': return '🎫';
-      default: return '📍';
-    }
-  };
-
-  const getColor = (type) => {
-    switch (type) {
-      case 'flight': return '#00ADEF';
-      case 'hotel': return '#8b5cf6';
-      case 'activity': return '#10b981';
-      default: return '#64748b';
-    }
-  };
-
-  return (
-    <div style={{
-      backgroundColor: 'white',
-      borderRadius: '16px',
-      marginBottom: '20px',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-      border: '1px solid #e2e8f0',
-      overflow: 'hidden',
-      transition: 'all 0.3s ease'
-    }}>
-      {/* Day Header */}
-      <button
-        onClick={onToggleDay}
-        style={{
-          width: '100%',
-          padding: '24px',
-          backgroundColor: isExpanded ? '#f0f9ff' : 'white',
-          border: 'none',
-          cursor: 'pointer',
-          textAlign: 'left',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          transition: 'background-color 0.2s'
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{
-            width: '56px',
-            height: '56px',
-            borderRadius: '50%',
-            backgroundColor: '#00ADEF',
-            color: 'white',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '24px',
-            fontWeight: 700,
-            boxShadow: '0 2px 8px rgba(0, 173, 239, 0.3)'
-          }}>
-            {day.day}
-          </div>
-          <div>
-            <div style={{ fontSize: '20px', fontWeight: 700, color: '#004C8C', marginBottom: '4px' }}>
-              Day {day.day}
-            </div>
-            <div style={{ fontSize: '14px', color: '#64748b' }}>
-              {day.date}
-            </div>
-          </div>
-          <div style={{
-            fontSize: '14px',
-            color: '#64748b',
-            padding: '4px 12px',
-            backgroundColor: '#f8fafc',
-            borderRadius: '12px'
-          }}>
-            {day.items.length} item{day.items.length > 1 ? 's' : ''}
-          </div>
-        </div>
-        <div style={{ fontSize: '24px', color: '#64748b' }}>
-          {isExpanded ? '▼' : '▶'}
-        </div>
-      </button>
-
-      {/* Day Items */}
-      {isExpanded && (
-        <div style={{ padding: '24px', borderTop: '1px solid #e2e8f0', backgroundColor: '#fafbfc' }}>
-          {day.items.map((item, itemIndex) => (
-            <ItemCard
-              key={itemIndex}
-              item={item}
-              icon={getIcon(item.type)}
-              color={getColor(item.type)}
-              isExpanded={expandedItems.has(`${day.day}-${itemIndex}`)}
-              onToggle={() => onToggleItem(itemIndex)}
-            />
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
-// Item Card Component
-function ItemCard({ item, icon, color, isExpanded, onToggle }) {
+function ActivitiesSection({ days, renderPrice }) {
   return (
-    <div style={{
-      marginBottom: '16px',
-      border: '1px solid #e2e8f0',
-      borderRadius: '12px',
-      overflow: 'hidden',
-      backgroundColor: 'white',
-      transition: 'all 0.2s'
-    }}>
-      <button
-        onClick={onToggle}
-        style={{
-          width: '100%',
-          padding: '20px',
-          backgroundColor: isExpanded ? '#f0f9ff' : 'white',
-          border: 'none',
-          cursor: 'pointer',
-          textAlign: 'left',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          transition: 'background-color 0.2s'
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ 
-            fontSize: '32px',
-            width: '48px',
-            height: '48px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            backgroundColor: `${color}20`,
-            borderRadius: '12px'
-          }}>
-            {icon}
-          </div>
+    <section className="itinerary-card">
+      <div className="itinerary-card-header">
           <div>
-            <div style={{ fontSize: '18px', fontWeight: 600, color: '#004C8C', marginBottom: '4px' }}>
-              {item.title}
+          <div className="itinerary-card-title">Daily activities</div>
+          <div className="itinerary-card-subtitle">
+            A day-by-day view of suggested experiences. Expand each day to review timing and details.
             </div>
-            <div style={{ fontSize: '14px', color: '#64748b' }}>
-              {item.time}
             </div>
           </div>
+      {days.length === 0 ? (
+        <div className="empty-state">Activities will appear here after your itinerary is generated.</div>
+      ) : (
+        <div className="itinerary-column">
+          {days.map((day) => (
+            <div key={day.day} className="activities-day">
+              <div className="activities-day-header">
+                <div className="activities-day-title">Day {day.day}</div>
+                <div className="activities-day-date">{day.date}</div>
         </div>
-        <div style={{ fontSize: '18px', color: '#64748b' }}>
-          {isExpanded ? '▼' : '▶'}
+              <div className="itinerary-column">
+                {day.items.map((item, index) => (
+                  <div key={`${day.day}-${index}`} className="activity-card">
+                    <div className="activity-item">
+                      <div className="activity-time">{item.time}</div>
+                      <div className="activity-details">
+                        <div className="activity-title">{item.title}</div>
+                        {item.meta?.description && (
+                          <div className="activity-meta">{item.meta.description}</div>
+                        )}
+                        <div className="activity-meta">
+                          {item.meta?.duration ? `Duration: ${item.meta.duration}` : ''}
+                          {item.meta?.price
+                            ? ` • ${renderPrice(item.meta.price, item.meta?.currency || 'USD')}`
+                            : ''}
+                        </div>
+                        {item.meta?.placeholder && (
+                          <div className="activity-meta">
+                            We&apos;ll fill this slot as soon as live availability returns from the provider.
         </div>
+      )}
+    </div>
+      </div>
+      </div>
+                ))}
+      </div>
+        </div>
+          ))}
+      </div>
+      )}
+    </section>
+  );
+}
+
+function CostSidebar({ cost, weightSummary, totalScore, scoreComponents, renderPrice }) {
+  return (
+    <aside className="cost-card">
+      <div>
+        <div className="itinerary-card-title">Investment overview</div>
+        <div className="itinerary-card-subtitle">
+          Optimized to reach {totalScore?.toFixed?.(1) ?? '—'}/100 overall score
+          {weightSummary ? ` using ${weightSummary}` : ''}.
+        </div>
+      </div>
+      <div className="cost-total">
+        <div className="cost-total-label">Estimated total</div>
+        <div className="cost-total-value">{renderPrice(cost.total, cost.currency || 'USD')}</div>
+        </div>
+      <div className="cost-list">
+        {cost.items.map((item) => (
+          <div key={item.label} className="cost-entry">
+            <span>{item.label}</span>
+            <span className="cost-entry-value">{renderPrice(item.value, item.currency || cost.currency || 'USD')}</span>
+      </div>
+        ))}
+        </div>
+      {scoreComponents && Object.keys(scoreComponents).length > 0 ? (
+        <div className="oi-cost-breakdown">
+          <div className="oi-cost-item">
+            <span>Flight score</span>
+            <span className="oi-cost-value">
+              {typeof scoreComponents.flight === 'number' ? `${scoreComponents.flight.toFixed(1)}/100` : '—'}
+            </span>
+          </div>
+          <div className="oi-cost-item">
+            <span>Hotel score</span>
+            <span className="oi-cost-value">
+              {typeof scoreComponents.hotel === 'number' ? `${scoreComponents.hotel.toFixed(1)}/100` : '—'}
+            </span>
+          </div>
+          <div className="oi-cost-item">
+            <span>Activity score</span>
+            <span className="oi-cost-value">
+              {typeof scoreComponents.activity === 'number' ? `${scoreComponents.activity.toFixed(1)}/100` : '—'}
+            </span>
+          </div>
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
+function PreferencesPanel({ preferences, onEdit }) {
+  return (
+    <section className="preferences-card">
+      <div className="itinerary-card-title">Optimization weights</div>
+      <div className="activity-meta">These weights were applied to every score in this itinerary.</div>
+      <div className="preferences-grid">
+        <PreferenceRow label="Budget" value={preferences.budget} />
+        <PreferenceRow label="Quality" value={preferences.quality} />
+        <PreferenceRow label="Convenience" value={preferences.convenience} />
+      </div>
+      <button type="button" className="itinerary-button secondary" onClick={onEdit}>
+        Edit weights
       </button>
+    </section>
+  );
+}
 
-      {isExpanded && (
-        <div style={{ 
-          padding: '20px', 
-          backgroundColor: '#f8fafc',
-          borderTop: `3px solid ${color}`
-        }}>
-          {item.type === 'flight' && (
-            <FlightDetails details={item.details} />
-          )}
-          {item.type === 'hotel' && (
-            <HotelDetails details={item.details} />
-          )}
-          {item.type === 'activity' && (
-            <ActivityDetails details={item.details} />
-          )}
-        </div>
-      )}
+function PreferenceRow({ label, value }) {
+  return (
+    <div className="preference-row">
+      <span>{label}</span>
+      <span className="preference-value">{(value * 100).toFixed(0)}%</span>
     </div>
   );
 }
 
-function FlightDetails({ details }) {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '20px' }}>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Departure</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.departure}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Arrival</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.arrival}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Duration</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.duration}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Stops</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
-          {details.stops === 0 ? 'Non-stop' : `${details.stops} stop${details.stops > 1 ? 's' : ''}`}
-        </div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Airline</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.airline || 'N/A'}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price</div>
-        <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
-          ${details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-        </div>
-      </div>
-    </div>
-  );
+function StatusBanner({ message }) {
+  return <div className="status-banner">{message}</div>;
 }
 
-function HotelDetails({ details }) {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '20px' }}>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Location</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.location}</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Distance from Center</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.distance} km</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Rating</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
-          ⭐ {details.rating.toFixed(1)}
-        </div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price per Night</div>
-        <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
-          ${details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-        </div>
-      </div>
-    </div>
-  );
-}
+function PreferencesModal({ initialPreferences, onSave, onClose }) {
+  const [localPreferences, setLocalPreferences] = useState(() => ({ ...initialPreferences }));
 
-function ActivityDetails({ details }) {
+  const updatePreference = (key, value) => {
+    setLocalPreferences((prev) => ({
+      ...prev,
+      [key]: Number(value),
+    }));
+  };
+
   return (
-    <div>
-      {details.description && (
-        <div style={{ marginBottom: '20px' }}>
-          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Description</div>
-          <div style={{ fontSize: '14px', color: '#004C8C', lineHeight: '1.6' }}>{details.description}</div>
+    <div className="modal-backdrop">
+      <div className="modal-card">
+        <div className="modal-header">
+          <div className="modal-title">Adjust optimization weights</div>
+          <div className="modal-subtitle">
+            Fine-tune how we rank flights, accommodations, and activities. The weights will automatically rebalance to total 100%.
         </div>
-      )}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '20px' }}>
-        <div>
-          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Duration</div>
-          <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.duration}</div>
         </div>
-        <div>
-          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Rating</div>
-          <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
-            ⭐ {details.rating.toFixed(1)}
+        <div className="modal-form">
+          <SliderRow
+            label="Budget"
+            value={localPreferences.budget}
+            onChange={(value) => updatePreference('budget', value)}
+          />
+          <SliderRow
+            label="Quality"
+            value={localPreferences.quality}
+            onChange={(value) => updatePreference('quality', value)}
+          />
+          <SliderRow
+            label="Convenience"
+            value={localPreferences.convenience}
+            onChange={(value) => updatePreference('convenience', value)}
+          />
+          </div>
+        <div className="modal-actions">
+          <button type="button" className="itinerary-button secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="itinerary-button primary"
+            onClick={() => onSave(localPreferences)}
+          >
+            Save and re-optimize
+          </button>
+        </div>
           </div>
         </div>
-        <div>
-          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price</div>
-          <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
-            ${details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-        </div>
+  );
+}
+
+function SliderRow({ label, value, onChange }) {
+  return (
+    <div className="slider-row">
+      <div className="slider-label">
+        <span>{label}</span>
+        <span>{(value * 100).toFixed(0)}%</span>
       </div>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step="0.05"
+        value={value}
+        className="slider-input"
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }
+

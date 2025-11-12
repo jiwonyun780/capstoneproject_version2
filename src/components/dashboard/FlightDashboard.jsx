@@ -1,9 +1,16 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FlightMap } from './FlightMap';
 import { PriceChart } from './PriceChart';
 import { FlightsTable } from './FlightsTable';
 import { ScrollArea } from '../ui/scroll-area';
+import { useFlightSelection } from '../../context/FlightSelectionContext';
+import { ComparisonModal } from './ComparisonModal';
+import {
+  normalizePreferenceWeights,
+  DEFAULT_PREFERENCE_WEIGHTS,
+  formatWeightSummary,
+} from '../../utils/preferences';
 
 // Mock data for demonstration - this will be replaced with real Amadeus API data
 const generateMockPriceData = (startDate = new Date()) => {
@@ -89,6 +96,12 @@ const flightsData = [
 
 export function FlightDashboard({ searchData = null }) {
   const navigate = useNavigate();
+  const {
+    selectedFlights,
+    getSelectedFlights,
+    clearSelectedFlights,
+  } = useFlightSelection();
+  const [showComparison, setShowComparison] = useState(false);
   
   // Debug logging
   console.log('FlightDashboard received searchData:', searchData);
@@ -148,6 +161,84 @@ export function FlightDashboard({ searchData = null }) {
   };
 
   const formattedErrorMessage = getErrorMessage(errorMessage);
+
+  const preferenceWeights = useMemo(() => {
+    const weightsSource =
+      searchData?.preferences?.preferences ??
+      searchData?.preferences ??
+      searchData?.preferenceWeights ??
+      null;
+    if (weightsSource) {
+      return normalizePreferenceWeights(weightsSource);
+    }
+    return DEFAULT_PREFERENCE_WEIGHTS;
+  }, [searchData]);
+
+  const comparisonFlights = useMemo(() => {
+    return selectedFlights.slice(0, 3);
+  }, [selectedFlights]);
+
+  const hasSelection = selectedFlights.length > 0;
+
+  const handleGenerateItinerary = () => {
+    if (!hasSelection) {
+      return;
+    }
+
+    const flightsPayload = getSelectedFlights().map((flight) => ({
+      id: flight.id,
+      airline: flight.airline,
+      flightNumber: flight.flightNumber,
+      departure: flight.departure,
+      arrival: flight.arrival,
+      duration: flight.duration,
+      price: flight.price,
+      currency: flight.currency || 'USD',
+      stops: flight.stops ?? 0,
+      bookingLink: flight.bookingLink || null,
+      cabin: flight.cabin || flight.cabinClass || null,
+    }));
+
+    const itineraryMessage = `Please generate a personalized itinerary based on the selected flight(s) to ${routeInfo.destination} on ${routeInfo.date}.`;
+    const structuredPayload = {
+      intent: 'generate_itinerary_from_selection',
+      routeInfo,
+      selectedFlights: flightsPayload,
+      preferenceWeights,
+    };
+
+    if (searchData?.onGenerateItinerary) {
+      searchData.onGenerateItinerary({
+        message: `${itineraryMessage}\n\nSelected Flights:\n${flightsPayload
+          .map(
+            (flight, index) =>
+              `${index + 1}. ${flight.airline} ${flight.flightNumber} — departs ${flight.departure}, arrives ${flight.arrival}, ${flight.duration}, ${flight.stops === 0 ? 'non-stop' : `${flight.stops} stop${flight.stops > 1 ? 's' : ''}`}, ${flight.currency}${Number(flight.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          )
+          .join('\n')}\n\n<flight_selection>${JSON.stringify(structuredPayload)}</flight_selection>`,
+        routeInfo,
+        selectedFlights: flightsPayload,
+        metadata: structuredPayload,
+        preferenceWeights,
+      });
+    } else {
+      navigate('/itinerary', {
+        state: {
+          routeInfo,
+          flights: flightsPayload,
+          outboundFlights: searchData?.outboundFlights || [],
+          returnFlights: searchData?.returnFlights || [],
+          preferences: { preferences: preferenceWeights },
+        },
+      });
+    }
+  };
+
+  const handleCompareSelected = () => {
+    if (!hasSelection) {
+      return;
+    }
+    setShowComparison(true);
+  };
 
   return (
     <ScrollArea className="h-full">
@@ -217,85 +308,220 @@ export function FlightDashboard({ searchData = null }) {
           <FlightsTable key={`flights-table-${displayFlightsData[0]?.id}-${displayFlightsData[0]?.price}`} flights={displayFlightsData} />
         )}
 
-        {/* Generate Itinerary / Save Trip Button */}
-        <div style={{ 
-          display: 'flex', 
-          flexDirection: 'row', 
-          gap: '12px', 
-          marginTop: '24px', 
-          paddingTop: '24px', 
-          borderTop: '1px solid #e2e8f0',
-          flexWrap: 'wrap'
-        }}>
+        {/* Selection Actions */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            marginTop: '24px',
+            paddingTop: '24px',
+            borderTop: '1px solid #e2e8f0',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '14px', color: '#0f172a' }}>
+                {hasSelection ? `✅ ${selectedFlights.length} flight${selectedFlights.length > 1 ? 's' : ''} selected.` : 'Select flights to create your itinerary.'}
+              </span>
+              {hasSelection && (
+                <button
+                  type="button"
+                  onClick={clearSelectedFlights}
+                  style={{
+                    fontSize: '12px',
+                    color: '#0f172a',
+                    textDecoration: 'underline',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  Clear selection
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
+              <div
+                style={{
+                  fontSize: '12px',
+                  color: '#475569',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+                title="Generate a custom itinerary based on your chosen flights."
+              >
+                ℹ️ Generate a custom itinerary based on your chosen flights.
+              </div>
+              <div
+                style={{
+                  fontSize: '12px',
+                  color: '#475569',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+                title="Compare prices, duration, and stops for selected flights."
+              >
+                📊 Compare prices and travel duration between selected flights.
+              </div>
+              <div
+                style={{
+                  fontSize: '12px',
+                  color: '#0f172a',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontWeight: 500,
+                }}
+                title="These weights shape every score and recommendation."
+              >
+                🎯 Weights applied: {formatWeightSummary(preferenceWeights)}
+              </div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              gap: '12px',
+              flexWrap: 'wrap',
+            }}
+          >
             <button
-              onClick={() => {
-                // Navigate to optimized itinerary page with flight data
-                // Preferences will be loaded from localStorage or use defaults
-                navigate('/itinerary', {
-                  state: {
-                    routeInfo: routeInfo,
-                    flights: displayFlightsData,
-                    outboundFlights: searchData?.outboundFlights || [],
-                    returnFlights: searchData?.returnFlights || [],
-                    preferences: searchData?.preferences || null
-                  }
-                });
-              }}
-              className="inline-flex items-center justify-center px-6 py-3 bg-[#00ADEF] text-white font-semibold rounded-lg hover:bg-[#006AAF] transition-colors shadow-md hover:shadow-lg"
+              onClick={handleGenerateItinerary}
+              disabled={!hasSelection}
+              className="inline-flex items-center justify-center px-6 py-3 bg-[#00ADEF] text-white font-semibold rounded-lg transition-colors shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
-                backgroundColor: '#00ADEF',
+                backgroundColor: hasSelection ? '#00ADEF' : '#94a3b8',
                 color: 'white',
                 fontWeight: '600',
                 padding: '12px 24px',
                 borderRadius: '8px',
                 border: 'none',
-                cursor: 'pointer',
+                cursor: hasSelection ? 'pointer' : 'not-allowed',
                 transition: 'all 0.2s ease',
-                boxShadow: '0 2px 4px rgba(0, 173, 239, 0.3)',
+                boxShadow: hasSelection ? '0 2px 4px rgba(0, 173, 239, 0.3)' : 'none',
               }}
               onMouseEnter={(e) => {
+                if (!hasSelection) return;
                 e.target.style.backgroundColor = '#006AAF';
                 e.target.style.transform = 'translateY(-1px)';
                 e.target.style.boxShadow = '0 4px 8px rgba(0, 173, 239, 0.4)';
               }}
               onMouseLeave={(e) => {
+                if (!hasSelection) return;
                 e.target.style.backgroundColor = '#00ADEF';
                 e.target.style.transform = 'translateY(0)';
                 e.target.style.boxShadow = '0 2px 4px rgba(0, 173, 239, 0.3)';
               }}
             >
-              <svg 
-                width="20" 
-                height="20" 
-                viewBox="0 0 20 20" 
-                fill="none" 
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 20 20"
+                fill="none"
                 style={{ marginRight: '8px' }}
               >
-                <path 
-                  d="M10 2L3 7V17C3 17.5304 3.21071 18.0391 3.58579 18.4142C3.96086 18.7893 4.46957 19 5 19H15C15.5304 19 16.0391 18.7893 16.4142 18.4142C16.7893 18.0391 17 17.5304 17 17V7L10 2Z" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M10 2L3 7V17C3 17.5304 3.21071 18.0391 3.58579 18.4142C3.96086 18.7893 4.46957 19 5 19H15C15.5304 19 16.0391 18.7893 16.4142 18.4142C16.7893 18.0391 17 17.5304 17 17V7L10 2Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                   fill="none"
                 />
-                <path 
-                  d="M10 10V19" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M10 10V19"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
-                <path 
-                  d="M3 7L10 12L17 7" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M3 7L10 12L17 7"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
               </svg>
               Generate Itinerary
             </button>
+
+            <button
+              onClick={handleCompareSelected}
+              disabled={!hasSelection}
+              className="inline-flex items-center justify-center px-6 py-3 bg-white text-[#00ADEF] font-semibold rounded-lg border-2 border-[#00ADEF] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                backgroundColor: hasSelection ? 'white' : '#f8fafc',
+                color: hasSelection ? '#00ADEF' : '#94a3b8',
+                fontWeight: '600',
+                padding: '12px 24px',
+                borderRadius: '8px',
+                border: `2px solid ${hasSelection ? '#00ADEF' : '#cbd5f5'}`,
+                cursor: hasSelection ? 'pointer' : 'not-allowed',
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={(e) => {
+                if (!hasSelection) return;
+                e.target.style.backgroundColor = '#E6F7FF';
+              }}
+              onMouseLeave={(e) => {
+                if (!hasSelection) return;
+                e.target.style.backgroundColor = 'white';
+              }}
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 20 20"
+                fill="none"
+                style={{ marginRight: '8px' }}
+              >
+                <path
+                  d="M10.833 4.167H15.833V9.167"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M9.167 15.833H4.167V10.833"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M15.833 4.167L11.667 8.333"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M4.167 15.833L8.333 11.667"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              Compare Selected
+            </button>
+
             <button
               onClick={() => {
                 if (searchData?.onSaveTrip) {
@@ -304,6 +530,8 @@ export function FlightDashboard({ searchData = null }) {
                     destinationCode: routeInfo.destinationCode,
                     departureDate: routeInfo.date || routeInfo.departure_display,
                     returnDate: routeInfo.return_display,
+                    selectedFlights,
+                    preferenceWeights,
                   });
                 }
               }}
@@ -325,38 +553,48 @@ export function FlightDashboard({ searchData = null }) {
                 e.target.style.backgroundColor = 'white';
               }}
             >
-              <svg 
-                width="20" 
-                height="20" 
-                viewBox="0 0 20 20" 
-                fill="none" 
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 20 20"
+                fill="none"
                 style={{ marginRight: '8px' }}
               >
-                <path 
-                  d="M17.5 2.5L9.16667 10.8333L2.5 4.16667" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M17.5 2.5L9.16667 10.8333L2.5 4.16667"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
-                <path 
-                  d="M15 2.5H17.5V5" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M15 2.5H17.5V5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
-                <path 
-                  d="M17.5 2.5V7.5C17.5 8.03043 17.2893 8.53914 16.9142 8.91421C16.5391 9.28929 16.0304 9.5 15.5 9.5H4.5C3.96957 9.5 3.46086 9.28929 3.08579 8.91421C2.71071 8.53914 2.5 8.03043 2.5 7.5V4.5C2.5 3.96957 2.71071 3.46086 3.08579 3.08579C3.46086 2.71071 3.96957 2.5 4.5 2.5H7.5" 
-                  stroke="currentColor" 
-                  strokeWidth="2" 
-                  strokeLinecap="round" 
+                <path
+                  d="M17.5 2.5V7.5C17.5 8.03043 17.2893 8.53914 16.9142 8.91421C16.5391 9.28929 16.0304 9.5 15.5 9.5H4.5C3.96957 9.5 3.46086 9.28929 3.08579 8.91421C2.71071 8.53914 2.5 8.03043 2.5 7.5V4.5C2.5 3.96957 2.71071 3.46086 3.08579 3.08579C3.46086 2.71071 3.96957 2.5 4.5 2.5H7.5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
               </svg>
               Save Trip
             </button>
+          </div>
         </div>
+        {showComparison && comparisonFlights.length > 0 && (
+          <ComparisonModal
+            selectedFlight={comparisonFlights[0]}
+            alternativeFlights={comparisonFlights.slice(1)}
+            onClose={() => setShowComparison(false)}
+            flights={comparisonFlights}
+            preferenceWeights={preferenceWeights}
+          />
+        )}
       </div>
     </ScrollArea>
   );

@@ -325,25 +325,21 @@ function renderTextWithMapLinks(text) {
 function renderItineraryVisual(content) {
   const itineraryMatch = content.match(/```itinerary\n([\s\S]*?)\n```/);
   if (!itineraryMatch) return renderMarkdown(content);
-  
-  try {
-    const itineraryData = JSON.parse(itineraryMatch[1]);
-    return (
-      <div style={{ margin: '16px 0' }}>
-        {itineraryData.days?.map((day, index) => (
-          <ItineraryCard
-            key={index}
-            day={day.day || index + 1}
-            activities={day.activities || []}
-            weather={day.weather}
-            time={day.time}
-          />
-        ))}
-      </div>
-    );
-  } catch (e) {
-    return renderMarkdown(content);
-  }
+
+  return (
+    <div style={{
+      border: '1px solid #e2e8f0',
+      borderRadius: '12px',
+      padding: '16px',
+      margin: '12px 0',
+      backgroundColor: '#f8fafc',
+      color: '#1e293b',
+      fontSize: '14px',
+      lineHeight: 1.5,
+    }}>
+      This itinerary is ready on the itinerary page. Tap <strong>View itinerary</strong> to open it.
+    </div>
+  );
 }
 
 // Render location visual components

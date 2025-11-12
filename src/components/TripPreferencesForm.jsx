@@ -1,22 +1,25 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import {
+  normalizePreferenceWeights,
+  storePreferenceWeights,
+} from '../utils/preferences';
 
-const TripPreferencesForm = ({ onComplete }) => {
-  const [budget, setBudget] = useState(3);
-  const [quality, setQuality] = useState(3);
-  const [convenience, setConvenience] = useState(3);
+const TripPreferencesForm = ({ onComplete, defaultRawValues }) => {
+  const initialBudget = defaultRawValues?.budget ?? 3;
+  const initialQuality = defaultRawValues?.quality ?? 3;
+  const initialConvenience = defaultRawValues?.convenience ?? 3;
+
+  const [budget, setBudget] = useState(initialBudget);
+  const [quality, setQuality] = useState(initialQuality);
+  const [convenience, setConvenience] = useState(initialConvenience);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
 
-  const normalizeWeights = (budgetVal, qualityVal, convenienceVal) => {
-    const total = budgetVal + qualityVal + convenienceVal;
-    if (total === 0) return { budget: 0.33, quality: 0.33, convenience: 0.34 };
-    return {
-      budget: budgetVal / total,
-      quality: qualityVal / total,
-      convenience: convenienceVal / total
-    };
-  };
+  const currentWeights = useMemo(
+    () => normalizePreferenceWeights({ budget, quality, convenience }),
+    [budget, quality, convenience],
+  );
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -24,7 +27,7 @@ const TripPreferencesForm = ({ onComplete }) => {
     setError(null);
     setResults(null);
 
-    const weights = normalizeWeights(budget, quality, convenience);
+    const weights = normalizePreferenceWeights({ budget, quality, convenience });
 
     try {
       const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -54,12 +57,13 @@ const TripPreferencesForm = ({ onComplete }) => {
       const data = await response.json();
       console.log('Trip optimization response:', data);
       setResults(data);
+      storePreferenceWeights(weights, { budget, quality, convenience });
       
       // Call onComplete callback with preferences
       if (onComplete) {
         onComplete({
-          preferences: weights,
-          rawValues: { budget, quality, convenience }
+          weights,
+          rawValues: { budget, quality, convenience },
         });
       }
     } catch (err) {
@@ -275,19 +279,19 @@ const TripPreferencesForm = ({ onComplete }) => {
             <div>
               <span style={{ color: '#004C8C', fontWeight: 500 }}>Budget: </span>
               <span style={{ color: '#00ADEF', fontWeight: 600 }}>
-                {(normalizeWeights(budget, quality, convenience).budget * 100).toFixed(1)}%
+                {(currentWeights.budget * 100).toFixed(1)}%
               </span>
             </div>
             <div>
               <span style={{ color: '#004C8C', fontWeight: 500 }}>Quality: </span>
               <span style={{ color: '#00ADEF', fontWeight: 600 }}>
-                {(normalizeWeights(budget, quality, convenience).quality * 100).toFixed(1)}%
+                {(currentWeights.quality * 100).toFixed(1)}%
               </span>
             </div>
             <div>
               <span style={{ color: '#004C8C', fontWeight: 500 }}>Convenience: </span>
               <span style={{ color: '#00ADEF', fontWeight: 600 }}>
-                {(normalizeWeights(budget, quality, convenience).convenience * 100).toFixed(1)}%
+                {(currentWeights.convenience * 100).toFixed(1)}%
               </span>
             </div>
           </div>
@@ -403,7 +407,7 @@ const TripPreferencesForm = ({ onComplete }) => {
                     textAlign: 'center',
                     fontWeight: 500
                   }}>
-                    Score: {option.score.toFixed(3)}
+                    Score: {option.score.toFixed(1)}/100
                   </div>
                 </div>
               </div>

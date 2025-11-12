@@ -9,8 +9,11 @@ import {
   TableHeader,
   TableRow,
 } from '../ui/table';
+import { useFlightSelection } from '../../context/FlightSelectionContext';
 
 export function FlightsTable({ flights }) {
+  const { toggleFlightSelection, isFlightSelected } = useFlightSelection();
+
   // Filter out invalid or empty flights
   const validFlights = (flights || []).filter(flight => {
     return flight && 
@@ -24,7 +27,7 @@ export function FlightsTable({ flights }) {
   if (validFlights.length === 0) {
     return null;
   }
-  
+
   return (
     <>
     <Card>
@@ -45,14 +48,14 @@ export function FlightsTable({ flights }) {
               <TableHead>Duration</TableHead>
               <TableHead>Stops</TableHead>
               <TableHead className="text-right">Price</TableHead>
-              <TableHead className="text-center">Book Now</TableHead>
+              <TableHead className="text-center">Select &amp; Book</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {validFlights.map((flight) => (
               <TableRow
                 key={flight.id}
-                className={flight.isOptimal ? 'bg-accent/50' : ''}
+                className={`${flight.isOptimal ? 'bg-accent/50' : ''} ${isFlightSelected(flight.id) ? 'bg-sky-50 border-l-4 border-sky-400 transition-colors' : ''}`}
               >
                 <TableCell>
                   <div className="flex items-center gap-2">
@@ -88,15 +91,27 @@ export function FlightsTable({ flights }) {
                   </div>
                 </TableCell>
                 <TableCell className="text-center">
-                  <a
-                    href={flight.bookingLink || `https://www.google.com/search?q=${encodeURIComponent(flight.airline + ' ' + flight.flightNumber + ' booking')}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    Book Now
-                  </a>
+                  <div className="flex items-center justify-center gap-3">
+                    <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select flight ${flight.airline} ${flight.flightNumber}`}
+                        checked={isFlightSelected(flight.id)}
+                        onChange={() => toggleFlightSelection(flight)}
+                        className="h-4 w-4 rounded border-sky-300 text-sky-500 focus:ring-sky-400 cursor-pointer"
+                      />
+                      <span className="text-xs text-slate-600">Select</span>
+                    </label>
+                    <a
+                      href={flight.bookingLink || `https://www.google.com/search?q=${encodeURIComponent(flight.airline + ' ' + flight.flightNumber + ' booking')}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      Book Now
+                    </a>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}

@@ -1,20 +1,27 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
+import {
+  loadPreferenceWeights,
+  normalizePreferenceWeights,
+  storePreferenceWeights,
+  DEFAULT_PREFERENCE_WEIGHTS,
+  loadRawPreferenceValues,
+} from '../utils/preferences';
 
 // Location detection utility
 async function getLocationContext() {
   const now = new Date();
   const now_iso = now.toISOString();
-  
+
   // Get timezone
   const user_tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  
+
   // Get locale
   const user_locale = navigator.language || 'en-US';
-  
+
   // Try to get location from browser
   let user_location = {
     city: null,
@@ -23,7 +30,7 @@ async function getLocationContext() {
     lat: null,
     lon: null
   };
-  
+
   try {
     if (navigator.geolocation) {
       const position = await new Promise((resolve, reject) => {
@@ -32,10 +39,10 @@ async function getLocationContext() {
           enableHighAccuracy: false
         });
       });
-      
+
       user_location.lat = position.coords.latitude;
       user_location.lon = position.coords.longitude;
-      
+
       // Try to reverse geocode to get city/country
       try {
         const response = await fetch(
@@ -45,13 +52,11 @@ async function getLocationContext() {
           const data = await response.json();
           user_location.city = data.city || data.locality;
           user_location.region = data.principalSubdivision;
-          
+
           // Clean up country name to remove "(the)" and other formatting issues
           let countryName = data.countryName;
           if (countryName) {
-            // Remove "(the)" from country names
             countryName = countryName.replace(/\s*\(the\)\s*$/i, '');
-            // Handle common country name variations
             if (countryName.toLowerCase().includes('united states')) {
               countryName = 'United States';
             } else if (countryName.toLowerCase().includes('united kingdom')) {
@@ -67,7 +72,7 @@ async function getLocationContext() {
   } catch (e) {
     console.log('Location detection failed:', e);
   }
-  
+
   return {
     now_iso,
     user_tz,
@@ -76,14 +81,124 @@ async function getLocationContext() {
   };
 }
 
+const CHAT_STORAGE_KEY = 'sta_chat_state_v1';
+const DEFAULT_CATEGORY_FLAGS = { flights: false, hotels: false, activities: false };
+
+const TRIP_DATE_PATTERNS = [
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{2,4})?/gi,
+  /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{2,4})?/gi,
+  /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\s*,\s*\d{2,4})?/gi,
+  /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s*,\s*\d{2,4})?/gi,
+  /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,
+  /\b\d{4}-\d{2}-\d{2}\b/g,
+];
+
+const AUTO_ITINERARY_PATTERNS = [
+  /(generate|create|make|plan)\s+(an?\s+)?itinerar[yi]\b/i,
+  /(generate|create|make|plan)\s+(an?\s+)?itineary\b/i,
+  /(generate|create|make|plan)\s+(an?\s+)?itenerary\b/i,
+  /\bgenerate\b.*\bitinerar[yi]\b/i,
+  /\bopen\b.*\bitinerar[yi]\b/i,
+  /\bshow\b.*\bitinerar[yi]\b/i,
+  /\bitinerar[yi]\s+page\b/i,
+];
+
+const normalizeOrdinalSuffix = (value) =>
+  typeof value === 'string' ? value.replace(/(\d{1,2})(st|nd|rd|th)/gi, '$1') : value;
+
+const cleanPlaceString = (value) => {
+  if (!value || typeof value !== 'string') return null;
+  return value.replace(/\s+/g, ' ').replace(/[,\.;:!?]+$/g, '').trim() || null;
+};
+
+function extractTripInfo(messageContent) {
+  if (!messageContent) {
+    return { origin: null, destination: null, departureDate: null, returnDate: null };
+  }
+
+  const normalized = messageContent.replace(/\s+/g, ' ').trim();
+
+  let origin = null;
+  let destination = null;
+
+  const fromToRegex = /\bfrom\s+([A-Za-z0-9&.\-' ]+?)\s+(?:to|→|->)\s+([A-Za-z0-9&.\-' ]+?)(?=$|[\.!,])/i;
+  const fromToMatch = normalized.match(fromToRegex);
+
+  if (fromToMatch) {
+    origin = cleanPlaceString(fromToMatch[1]);
+    destination = cleanPlaceString(fromToMatch[2]);
+  } else {
+    const toRegex = /\bto\s+([A-Za-z0-9&.\-' ]+?)(?=$|[\.!,])/i;
+    const toMatch = normalized.match(toRegex);
+    if (toMatch) {
+      destination = cleanPlaceString(toMatch[1]);
+    }
+
+    const fromRegex = /\bfrom\s+([A-Za-z0-9&.\-' ]+?)(?=$|[\.!,])/i;
+    const fromMatch = normalized.match(fromRegex);
+    if (fromMatch) {
+      origin = cleanPlaceString(fromMatch[1]);
+    }
+  }
+
+  const datesFound = [];
+
+  TRIP_DATE_PATTERNS.forEach((pattern) => {
+    const matches = normalized.match(pattern);
+    if (matches) {
+      matches.forEach((raw) => {
+        const cleaned = normalizeOrdinalSuffix(raw.replace(/,/g, ' ').trim()).replace(/\s+/g, ' ');
+        if (cleaned && !datesFound.includes(cleaned)) {
+          datesFound.push(cleaned);
+        }
+      });
+    }
+  });
+
+  return {
+    origin,
+    destination,
+    departureDate: datesFound[0] || null,
+    returnDate: datesFound[1] || null,
+  };
+}
+
+const loadStoredChatState = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn('Unable to read stored chat state', err);
+    return null;
+  }
+};
+
+const persistChatState = (state) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state));
+  } catch (err) {
+    console.warn('Unable to persist chat state', err);
+  }
+};
+
 // Helper function to clean context data
 function cleanContext(context) {
   if (!context) return context;
-  
+
   const cleaned = { ...context };
   if (cleaned.user_location) {
     const location = { ...cleaned.user_location };
-    // Remove null/undefined values
     Object.keys(location).forEach(key => {
       if (location[key] === null || location[key] === undefined) {
         delete location[key];
@@ -95,30 +210,25 @@ function cleanContext(context) {
 }
 
 async function sendToApi(messages, context, sessionId, preferences = null) {
-  // Use production Vercel backend or fallback to localhost for development
-  // For local development (localhost), always use localhost backend
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   const base = isLocalhost 
-    ? 'http://localhost:8000'  // Force localhost for local development
+    ? 'http://localhost:8000'
     : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
-  console.log('API Base URL:', base);
-  console.log('Making request to:', `${base}/api/chat`);
-  
+
   const cleanedContext = cleanContext(context);
-  console.log('Cleaned context:', cleanedContext);
-  console.log('User preferences:', preferences);
-  
-  // Include preferences in request if available
+
   const requestBody = {
     messages,
     context: cleanedContext,
     session_id: sessionId
   };
-  
-  if (preferences && preferences.preferences) {
-    requestBody.preferences = preferences.preferences;
+
+  const resolvedPreferences = preferences?.preferences ? preferences.preferences : preferences;
+  if (resolvedPreferences) {
+    const normalizedPreferences = normalizePreferenceWeights(resolvedPreferences);
+    requestBody.preferences = normalizedPreferences;
   }
-  
+
   const res = await fetch(`${base}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -128,68 +238,239 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   return res.json();
 }
 
-export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
+export default function Chat({ pendingMessage, pendingMessageMetadata, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
   const navigate = useNavigate();
-  const [messages, setMessages] = useState([]);
+
+  const storedChatState = useMemo(() => loadStoredChatState(), []);
+  const storedRawPreferences = useMemo(() => loadRawPreferenceValues(), []);
+  const storedWeightPreferences = useMemo(() => loadPreferenceWeights(), []);
+
+  const [messages, setMessages] = useState(() => storedChatState?.messages || []);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
   const [context, setContext] = useState(null);
   const [, setIsLoadingContext] = useState(true);
-  const [sessionId, setSessionId] = useState(null);
+  const [sessionId, setSessionId] = useState(() => storedChatState?.sessionId || null);
+  const [userPreferences, setUserPreferences] = useState(
+    () => storedChatState?.userPreferences || storedWeightPreferences || DEFAULT_PREFERENCE_WEIGHTS,
+  );
+  const [rawPreferenceValues, setRawPreferenceValues] = useState(
+    () => storedRawPreferences || { budget: 3, quality: 3, convenience: 3 },
+  );
   const [onboardingComplete, setOnboardingComplete] = useState(false);
-  const [userPreferences, setUserPreferences] = useState(null);
+  const [requestedCategories, setRequestedCategories] = useState(
+    () => storedChatState?.requestedCategories || { ...DEFAULT_CATEGORY_FLAGS },
+  );
+  const [tripContext, setTripContext] = useState(() => storedChatState?.tripContext || {});
+
+  const mergeTripContext = useCallback((partial = {}) => {
+    if (!partial) {
+      return;
+    }
+
+    setTripContext((prevContext = {}) => {
+      let updated = false;
+      const nextContext = { ...(prevContext || {}) };
+
+      const apply = (field, rawValue) => {
+        if (rawValue === undefined || rawValue === null) return;
+
+        let cleanedValue = rawValue;
+        if (typeof rawValue === 'string') {
+          if (field === 'origin' || field === 'destination') {
+            cleanedValue = cleanPlaceString(rawValue);
+          } else if (field === 'departureDate' || field === 'returnDate') {
+            cleanedValue = normalizeOrdinalSuffix(rawValue.replace(/,/g, ' ').trim()).replace(/\s+/g, ' ');
+          } else {
+            cleanedValue = rawValue.trim();
+          }
+        }
+
+        if (!cleanedValue) return;
+        if (typeof cleanedValue === 'string' && cleanedValue.toLowerCase() === 'unknown') return;
+        if (nextContext[field] === cleanedValue) return;
+
+        nextContext[field] = cleanedValue;
+        updated = true;
+      };
+
+      apply('origin', partial.origin);
+      apply('destination', partial.destination);
+      apply('originCode', partial.originCode);
+      apply('destinationCode', partial.destinationCode);
+      apply('departureDate', partial.departureDate);
+      apply('returnDate', partial.returnDate);
+
+      return updated ? nextContext : prevContext;
+    });
+  }, []);
+
   const scrollRef = useRef(null);
   const pendingMessageSentRef = useRef(false);
+  const latestItineraryDataRef = useRef(null);
 
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
 
-  const handleOnboardingComplete = (preferences) => {
-    setUserPreferences(preferences);
+  const navigateToItinerary = useCallback(
+    (explicitRouteInfo = null, extraState = {}) => {
+      const baseRoute = explicitRouteInfo || {
+        departure: tripContext?.origin || 'Unknown',
+        destination: tripContext?.destination || 'Unknown',
+        departureCode: tripContext?.originCode || '',
+        destinationCode: tripContext?.destinationCode || '',
+        date:
+          tripContext?.departureDate ||
+          new Date().toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+          }),
+        returnDate: tripContext?.returnDate || null,
+      };
+
+      if (!baseRoute.destination || baseRoute.destination === 'Unknown') {
+        setError('I need a destination to generate the itinerary. Please share where you want to go.');
+        return false;
+      }
+
+      navigate('/itinerary', {
+        state: {
+          routeInfo: baseRoute,
+          flights: [],
+          outboundFlights: [],
+          returnFlights: [],
+          preferences: { preferences: userPreferences },
+          ...extraState,
+        },
+      });
+      return true;
+    },
+    [navigate, tripContext, userPreferences],
+  );
+
+  const requestItineraryGeneration = useCallback(
+    (sourceMessage) => {
+      const itineraryPayload = {
+        type: 'generate_itinerary',
+        route: {
+          departure: tripContext?.origin,
+          destination: tripContext?.destination,
+          departureCode: tripContext?.originCode,
+          destinationCode: tripContext?.destinationCode,
+          date: tripContext?.departureDate,
+          returnDate: tripContext?.returnDate,
+        },
+        sourceMessage,
+      };
+
+      mergeTripContext(itineraryPayload.route || {});
+      navigateToItinerary(itineraryPayload.route, { itineraryRequest: itineraryPayload });
+    },
+    [mergeTripContext, navigateToItinerary, tripContext],
+  );
+
+  const handleOnboardingComplete = (preferencesPayload) => {
+    const weightsSource =
+      preferencesPayload?.weights ??
+      preferencesPayload?.preferences ??
+      preferencesPayload;
+    const normalizedWeights = normalizePreferenceWeights(weightsSource || DEFAULT_PREFERENCE_WEIGHTS);
+    setUserPreferences(normalizedWeights);
     setOnboardingComplete(true);
-    // Note: We don't save to localStorage so the form shows every time the user visits
+    const rawValues = preferencesPayload?.rawValues ?? null;
+    if (rawValues) {
+      setRawPreferenceValues(rawValues);
+    }
+    storePreferenceWeights(normalizedWeights, rawValues);
+
+    setRequestedCategories({ ...DEFAULT_CATEGORY_FLAGS });
+    setTripContext({});
+
+    // Clear chat history when onboarding is completed (fresh conversation per session start)
+    setMessages([
+      {
+        role: 'assistant',
+        content: "Great! Preferences saved. Let me know how I can help with your trip.",
+        timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      },
+    ]);
+    setError(null);
+    setIsTyping(false);
   };
 
   // Initialize context and welcome message
   useEffect(() => {
+    let cancelled = false;
+
     const initializeChat = async () => {
       try {
         const locationContext = await getLocationContext();
+        if (cancelled) return;
+
         setContext(locationContext);
-        
-        // Generate session ID for cache continuity
+
         const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        setSessionId(newSessionId);
-        
-        // Create welcome message with location context
-        let welcomeMessage = "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip.";
-        
-        if (locationContext.user_location.city && locationContext.user_location.country) {
-          welcomeMessage += ` I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}.`;
-        } else if (locationContext.user_location.country) {
-          welcomeMessage += ` I can see you're in ${locationContext.user_location.country}.`;
+        setSessionId((prev) => prev || newSessionId);
+
+        if (!storedChatState?.messages?.length) {
+          let welcomeMessage = "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip.";
+
+          if (locationContext.user_location.city && locationContext.user_location.country) {
+            welcomeMessage += ` I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}.`;
+          } else if (locationContext.user_location.country) {
+            welcomeMessage += ` I can see you're in ${locationContext.user_location.country}.`;
+          }
+
+          welcomeMessage += " Where would you like to go?";
+
+          setMessages([
+            {
+              role: 'assistant',
+              content: welcomeMessage,
+              timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
         }
-        
-        welcomeMessage += " Where would you like to go?";
-        
-        setMessages([{
-          role: 'assistant',
-          content: welcomeMessage,
-          timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-        }]);
       } catch (e) {
         console.error('Failed to initialize context:', e);
-        setMessages([{
-          role: 'assistant',
-          content: "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip. Where would you like to go?",
-          timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-        }]);
+        if (storedChatState?.messages?.length || cancelled) {
+          return;
+        }
+        setMessages([
+          {
+            role: 'assistant',
+            content: "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip. Where would you like to go?",
+            timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+          },
+        ]);
       } finally {
-        setIsLoadingContext(false);
+        if (!cancelled) {
+          setIsLoadingContext(false);
+        }
       }
     };
-    
+
     initializeChat();
-  }, []);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storedChatState]);
+
+  useEffect(() => {
+    if (!onboardingComplete) {
+      return;
+    }
+
+    persistChatState({
+      messages,
+      onboardingComplete,
+      userPreferences,
+      sessionId,
+      requestedCategories,
+      tripContext,
+    });
+  }, [messages, onboardingComplete, userPreferences, sessionId, requestedCategories, tripContext]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -201,509 +482,323 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   useEffect(() => {
     if (pendingMessage && !pendingMessageSentRef.current && onboardingComplete && !isTyping && messages.length > 0) {
       pendingMessageSentRef.current = true;
-      // Small delay to ensure UI is ready
       const timer = setTimeout(() => {
-        handleSend(pendingMessage);
+        handleSend(pendingMessage, { metadata: pendingMessageMetadata });
         if (onPendingMessageSent) {
           onPendingMessageSent();
         }
         pendingMessageSentRef.current = false;
       }, 300);
-      
+
       return () => clearTimeout(timer);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingMessage, onboardingComplete, isTyping, messages.length]);
+  }, [pendingMessage, pendingMessageMetadata, onboardingComplete, isTyping, messages.length, onPendingMessageSent]);
 
-  // Function to extract dates from user message
-  const extractDatesFromMessage = (message) => {
-    const lowerMessage = message.toLowerCase();
-    
-    // Look for month names and dates
-    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
-                       'july', 'august', 'september', 'october', 'november', 'december'];
-    const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-                         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-    
-    let departureDate = null;
-    let returnDate = null;
-    
-    // Look for patterns like "december 1" or "dec 1"
-    const datePatterns = [
-      /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
-      /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
-      /(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/gi,
-      /(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/gi
-    ];
-    
-    const matches = [];
-    datePatterns.forEach(pattern => {
-      const found = lowerMessage.match(pattern);
-      if (found) {
-        console.log('Date pattern matched:', pattern, 'Found:', found);
-        matches.push(...found);
-      }
-    });
-    
-    console.log('All date matches:', matches);
-    
-    if (matches.length > 0) {
-      // Parse the first date as departure
-      const firstMatch = matches[0];
-      const monthMatch = firstMatch.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
-      const dayMatch = firstMatch.match(/(\d{1,2})/);
-      
-      if (monthMatch && dayMatch) {
-        const monthName = monthMatch[0].toLowerCase();
-        const day = parseInt(dayMatch[1]);
-        const year = new Date().getFullYear();
-        
-        // Convert month name to number
-        let monthNum;
-        if (monthNames.includes(monthName)) {
-          monthNum = monthNames.indexOf(monthName);
-        } else if (monthAbbrevs.includes(monthName)) {
-          monthNum = monthAbbrevs.indexOf(monthName);
-        }
-        
-        if (monthNum !== undefined) {
-          departureDate = new Date(year, monthNum, day);
-          
-          // If there's a second date, use it as return date
-          if (matches.length > 1) {
-            const secondMatch = matches[1];
-            const secondMonthMatch = secondMatch.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
-            const secondDayMatch = secondMatch.match(/(\d{1,2})/);
-            
-            if (secondMonthMatch && secondDayMatch) {
-              const secondMonthName = secondMonthMatch[0].toLowerCase();
-              const secondDay = parseInt(secondDayMatch[1]);
-              
-              let secondMonthNum;
-              if (monthNames.includes(secondMonthName)) {
-                secondMonthNum = monthNames.indexOf(secondMonthName);
-              } else if (monthAbbrevs.includes(secondMonthName)) {
-                secondMonthNum = monthAbbrevs.indexOf(secondMonthName);
-              }
-              
-              if (secondMonthNum !== undefined) {
-                returnDate = new Date(year, secondMonthNum, secondDay);
-              }
-            }
-          }
-        }
-      }
+  const handleSend = async (text, options = {}) => {
+    const lowerText = String(text || '').toLowerCase();
+    const autoGenerateItinerary = AUTO_ITINERARY_PATTERNS.some((pattern) => pattern.test(text || ''));
+
+    const messageTripInfo = extractTripInfo(text || '');
+    if (
+      messageTripInfo.origin ||
+      messageTripInfo.destination ||
+      messageTripInfo.departureDate ||
+      messageTripInfo.returnDate
+    ) {
+      mergeTripContext(messageTripInfo);
     }
-    
-    return { departureDate, returnDate };
-  };
 
-  // Function to extract cities from user message
-  const extractCitiesFromMessage = (message) => {
-    const lowerMessage = message.toLowerCase();
-    
-    // Common city mappings
-    const cityMappings = {
-      'new york': { name: 'New York', code: 'JFK' },
-      'nyc': { name: 'New York', code: 'JFK' },
-      'washington dc': { name: 'Washington DC', code: 'DCA' },
-      'washington': { name: 'Washington DC', code: 'DCA' },
-      'dc': { name: 'Washington DC', code: 'DCA' },
-      'barcelona': { name: 'Barcelona', code: 'BCN' },
-      'paris': { name: 'Paris', code: 'CDG' },
-      'london': { name: 'London', code: 'LHR' },
-      'tokyo': { name: 'Tokyo', code: 'NRT' },
-      'los angeles': { name: 'Los Angeles', code: 'LAX' },
-      'lax': { name: 'Los Angeles', code: 'LAX' },
-      'miami': { name: 'Miami', code: 'MIA' },
-      'chicago': { name: 'Chicago', code: 'ORD' },
-      'rome': { name: 'Rome', code: 'FCO' },
-      'madrid': { name: 'Madrid', code: 'MAD' },
-      'berlin': { name: 'Berlin', code: 'BER' },
-      'amsterdam': { name: 'Amsterdam', code: 'AMS' },
-      'dublin': { name: 'Dublin', code: 'DUB' },
-      'sydney': { name: 'Sydney', code: 'SYD' },
-      'melbourne': { name: 'Melbourne', code: 'MEL' },
-      'toronto': { name: 'Toronto', code: 'YYZ' },
-      'vancouver': { name: 'Vancouver', code: 'YVR' },
-      'mexico city': { name: 'Mexico City', code: 'MEX' },
-      'sao paulo': { name: 'São Paulo', code: 'GRU' },
-      'rio de janeiro': { name: 'Rio de Janeiro', code: 'GIG' },
-      'buenos aires': { name: 'Buenos Aires', code: 'EZE' },
-      'lima': { name: 'Lima', code: 'LIM' },
-      'bogota': { name: 'Bogotá', code: 'BOG' },
-      'santiago': { name: 'Santiago', code: 'SCL' },
-      'montevideo': { name: 'Montevideo', code: 'MVD' },
-      'caracas': { name: 'Caracas', code: 'CCS' },
-      'havana': { name: 'Havana', code: 'HAV' },
-      'kingston': { name: 'Kingston', code: 'KIN' },
-      'nassau': { name: 'Nassau', code: 'NAS' },
-      'san juan': { name: 'San Juan', code: 'SJU' },
-      'prague': { name: 'Prague', code: 'PRG' },
-      'vienna': { name: 'Vienna', code: 'VIE' },
-      'budapest': { name: 'Budapest', code: 'BUD' },
-      'warsaw': { name: 'Warsaw', code: 'WAW' },
-      'moscow': { name: 'Moscow', code: 'SVO' },
-      'istanbul': { name: 'Istanbul', code: 'IST' },
-      'cairo': { name: 'Cairo', code: 'CAI' },
-      'cape town': { name: 'Cape Town', code: 'CPT' },
-      'johannesburg': { name: 'Johannesburg', code: 'JNB' },
-      'casablanca': { name: 'Casablanca', code: 'CMN' },
-      'marrakech': { name: 'Marrakech', code: 'RAK' },
-      'tunis': { name: 'Tunis', code: 'TUN' },
-      'algiers': { name: 'Algiers', code: 'ALG' },
-      'lagos': { name: 'Lagos', code: 'LOS' },
-      'nairobi': { name: 'Nairobi', code: 'NBO' },
-      'addis ababa': { name: 'Addis Ababa', code: 'ADD' },
-      'dakar': { name: 'Dakar', code: 'DKR' },
-      'accra': { name: 'Accra', code: 'ACC' },
-      'abidjan': { name: 'Abidjan', code: 'ABJ' },
-      'douala': { name: 'Douala', code: 'DLA' },
-      'kinshasa': { name: 'Kinshasa', code: 'FIH' },
-      'luanda': { name: 'Luanda', code: 'LAD' },
-      'maputo': { name: 'Maputo', code: 'MPM' },
-      'harare': { name: 'Harare', code: 'HRE' },
-      'windhoek': { name: 'Windhoek', code: 'WDH' },
-      'antananarivo': { name: 'Antananarivo', code: 'TNR' },
-      'port louis': { name: 'Port Louis', code: 'MRU' },
-      'victoria': { name: 'Victoria', code: 'SEZ' },
-      'moroni': { name: 'Moroni', code: 'HAH' },
-      'djibouti': { name: 'Djibouti', code: 'JIB' },
-      'asmera': { name: 'Asmara', code: 'ASM' },
-      'khartoum': { name: 'Khartoum', code: 'KRT' },
-      'juba': { name: 'Juba', code: 'JUB' },
-      'bangui': { name: 'Bangui', code: 'BGF' },
-      'ndjamena': { name: 'N\'Djamena', code: 'NDJ' },
-      'yaounde': { name: 'Yaoundé', code: 'YAO' },
-      'libreville': { name: 'Libreville', code: 'LBV' },
-      'malabo': { name: 'Malabo', code: 'SSG' },
-      'brazzaville': { name: 'Brazzaville', code: 'BZV' },
-      'bujumbura': { name: 'Bujumbura', code: 'BJM' },
-      'kigali': { name: 'Kigali', code: 'KGL' },
-      'kampala': { name: 'Kampala', code: 'EBB' },
-      'dodoma': { name: 'Dodoma', code: 'DOD' },
-      'dar es salaam': { name: 'Dar es Salaam', code: 'DAR' },
-      'lusaka': { name: 'Lusaka', code: 'LUN' },
-      'gaborone': { name: 'Gaborone', code: 'GBE' },
-      'maseru': { name: 'Maseru', code: 'MSU' },
-      'mbabane': { name: 'Mbabane', code: 'SHO' },
-      'pretoria': { name: 'Pretoria', code: 'PRY' },
-      'bloemfontein': { name: 'Bloemfontein', code: 'BFN' },
-      'durban': { name: 'Durban', code: 'DUR' },
-      'port elizabeth': { name: 'Port Elizabeth', code: 'PLZ' },
-      'east london': { name: 'East London', code: 'ELS' },
-      'kimberley': { name: 'Kimberley', code: 'KIM' },
-      'polokwane': { name: 'Polokwane', code: 'PTG' },
-      'nelspruit': { name: 'Nelspruit', code: 'NLP' },
-      'richards bay': { name: 'Richards Bay', code: 'RCB' },
-      'george': { name: 'George', code: 'GRJ' },
-      'upington': { name: 'Upington', code: 'UTN' },
-      'springbok': { name: 'Springbok', code: 'SBU' },
-      'calvinia': { name: 'Calvinia', code: 'CVI' },
-      'sutherland': { name: 'Sutherland', code: 'SUT' },
-      'clanwilliam': { name: 'Clanwilliam', code: 'CLW' },
-      'vredendal': { name: 'Vredendal', code: 'VRD' },
-      'vanrhynsdorp': { name: 'Vanrhynsdorp', code: 'VRS' },
-      'nieuwoudtville': { name: 'Nieuwoudtville', code: 'NWV' },
-      'loeriesfontein': { name: 'Loeriesfontein', code: 'LRS' }
-    };
-    
-    let origin = null;
-    let destination = null;
-    
-    // Look for various route patterns
-    const routePatterns = [
-      // "flights to Washington DC to Barcelona from December 1 to December 5"
-      /flights?\s+to\s+([^to]+?)\s+to\s+([^from]+?)(?:\s+from|\s+to|$)/gi,
-      // "from X to Y"
-      /from\s+([^to]+?)\s+to\s+([^from]+?)(?:\s+from|\s+to|$)/gi,
-      // "X to Y"
-      /([^to]+?)\s+to\s+([^from]+?)(?:\s+from|\s+to|$)/gi
-    ];
-    
-    for (const pattern of routePatterns) {
-      const match = lowerMessage.match(pattern);
-      if (match) {
-        console.log('Pattern matched:', pattern, 'Match:', match[0]);
-        const parts = match[0].split(/\s+to\s+/i);
-        console.log('Split parts:', parts);
-        
-        if (parts.length >= 2) {
-          const originPart = parts[0].replace(/^(from|flights?)\s+/i, '').trim();
-          const destPart = parts[1].trim();
-          
-          console.log('Origin part:', originPart, 'Dest part:', destPart);
-          
-          // Try to find cities in the mappings
-          for (const [key, value] of Object.entries(cityMappings)) {
-            if (originPart.includes(key)) {
-              origin = value;
-              console.log('Found origin:', key, '->', value);
-            }
-            if (destPart.includes(key)) {
-              destination = value;
-              console.log('Found destination:', key, '->', value);
-            }
-          }
-          
-          if (origin && destination) break;
-        }
-      }
-    }
-    
-    // Fallback: if no pattern matched, try to find cities anywhere in the message
-    if (!origin || !destination) {
-      const foundCities = [];
-      for (const [key, value] of Object.entries(cityMappings)) {
-        if (lowerMessage.includes(key)) {
-          foundCities.push(value);
-        }
-      }
-      
-      if (foundCities.length >= 2) {
-        origin = foundCities[0];
-        destination = foundCities[1];
-      }
-    }
-    
-    console.log('City extraction debug:', {
-      message: lowerMessage,
-      origin,
-      destination,
-      foundCities: !origin || !destination ? Object.keys(cityMappings).filter(key => lowerMessage.includes(key)) : []
-    });
-    
-    return { origin, destination };
-  };
+    setRequestedCategories((prev) => ({
+      flights:
+        autoGenerateItinerary ||
+        prev.flights ||
+        /(flight|flights|airline|airlines|plane|planes|fly|ticket|tickets)/.test(lowerText),
+      hotels:
+        autoGenerateItinerary ||
+        prev.hotels ||
+        /(hotel|hotels|accommodation|stay|lodging|resort)/.test(lowerText),
+      activities:
+        autoGenerateItinerary ||
+        prev.activities ||
+        /(activity|activities|tour|tours|thing to do|things to do|experience|experiences|attraction|attractions|event|events)/.test(lowerText),
+    }));
 
-
-
-  const handleSend = async (text) => {
+    const metadata = options.metadata || null;
     const userMsg = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) };
+    if (metadata) {
+      userMsg.metadata = metadata;
+    }
     setMessages((prev) => [...prev, userMsg]);
     setError(null);
+
+    if (autoGenerateItinerary) {
+      requestItineraryGeneration(text);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'Great! Opening your itinerary page so we can build the plan there.',
+          timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+      return;
+    }
+
     setIsTyping(true);
-        try {
-          const payload = [...messages, userMsg];
-          console.log('Sending to API:', { payload, context, sessionId, preferences: userPreferences });
-          const data = await sendToApi(payload, context, sessionId, userPreferences);
-          console.log('API Response:', data);
-          const reply = data.reply || '';
-          setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
-        } catch (e) {
-          console.error('API Error:', e);
-          setError('Something went wrong. Please try again.');
-          setMessages((prev) => [...prev, { role: 'assistant', content: 'Sorry, there was an error reaching the server.', timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
-        } finally {
-          setIsTyping(false);
+    try {
+      const payload = [...messages, userMsg];
+      console.log('Sending to API:', { payload, context, sessionId, preferences: userPreferences });
+      const data = await sendToApi(payload, context, sessionId, userPreferences);
+      console.log('API Response:', data);
+      const reply = data.reply || '';
+
+      let dashboardPayload = null;
+      if (data.amadeus_data) {
+        dashboardPayload = prepareDashboardPayload(data.amadeus_data, userPreferences);
+        if (dashboardPayload) {
+          if (dashboardPayload.route) {
+            mergeTripContext({
+              origin: dashboardPayload.route.departure,
+              destination: dashboardPayload.route.destination,
+              originCode: dashboardPayload.route.departureCode,
+              destinationCode: dashboardPayload.route.destinationCode,
+              departureDate: dashboardPayload.route.date || dashboardPayload.route.departure_display,
+              returnDate: dashboardPayload.route.returnDate || dashboardPayload.route.return_display,
+            });
+          }
+
+          latestItineraryDataRef.current = dashboardPayload;
+          if (onShowDashboard) {
+            onShowDashboard(dashboardPayload);
+          }
+        } else if (onHideDashboard && latestItineraryDataRef.current) {
+          onHideDashboard();
+          latestItineraryDataRef.current = null;
         }
+      }
+
+      if (autoGenerateItinerary) {
+        requestItineraryGeneration(text);
+      }
+
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
+    } catch (e) {
+      console.error('API Error:', e);
+      setError('Something went wrong. Please try again.');
+      setMessages((prev) => [...prev, { role: 'assistant', content: 'Sorry, there was an error reaching the server.', timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
+    } finally {
+      setIsTyping(false);
+    }
   };
 
-  // Extract destination and dates from message content
-  const extractTripInfo = (messageContent) => {
-    let destination = null;
-    let departureDate = null;
-    let returnDate = null;
-    
-    // Try to extract destination from various patterns
-    // Pattern 1: "Flights from X to Y"
-    const fromToPattern = /Flights?\s+from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
-    const fromToMatch = messageContent.match(fromToPattern);
-    if (fromToMatch) {
-      destination = fromToMatch[1].trim();
+  const prepareDashboardPayload = (rawData, weightOverride = null) => {
+    if (!rawData || rawData.error) {
+      return null;
     }
-    
-    // Pattern 2: "from X to Y" (without "Flights" prefix)
-    const simpleFromToPattern = /from\s+[^to]+\s+to\s+([A-Z][a-zA-Z\s]+)/i;
-    const simpleMatch = messageContent.match(simpleFromToPattern);
-    if (simpleMatch && !destination) {
-      destination = simpleMatch[1].trim();
+
+    const outboundFlights = rawData.outboundFlights || [];
+    const returnFlights = rawData.returnFlights || [];
+    const fallbackFlights = outboundFlights.length > 0 ? outboundFlights : (rawData.flights || []);
+    const routeInfo = rawData.route;
+
+    if (!routeInfo) {
+      return null;
     }
-    
-    // Pattern 3: Just look for city names after "to"
-    const toPattern = /\s+to\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|\n)/i;
-    const toMatch = messageContent.match(toPattern);
-    if (toMatch && !destination) {
-      destination = toMatch[1].trim();
-    }
-    
-    // Extract dates
-    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
-                       'july', 'august', 'september', 'october', 'november', 'december'];
-    const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
-                         'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-    
-    // Look for date patterns
-    const datePatterns = [
-      /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
-      /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
-      /(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/gi,
-      /(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/gi,
-      /(\d{1,2}\/\d{1,2}\/\d{4})/g,
-      /(\d{4}-\d{2}-\d{2})/g
-    ];
-    
-    const dateMatches = [];
-    datePatterns.forEach(pattern => {
-      const matches = messageContent.match(pattern);
-      if (matches) {
-        dateMatches.push(...matches);
-      }
-    });
-    
-    if (dateMatches.length > 0) {
-      departureDate = dateMatches[0];
-      if (dateMatches.length > 1) {
-        returnDate = dateMatches[1];
-      }
-    }
-    
-    return { destination, departureDate, returnDate };
+
+    const normalizedFromResponse = rawData.preferences
+      ? normalizePreferenceWeights(rawData.preferences)
+      : null;
+    const normalizedWeights = weightOverride
+      ? normalizePreferenceWeights(weightOverride)
+      : normalizedFromResponse;
+
+    return {
+      ...rawData,
+      route: routeInfo,
+      flights: fallbackFlights,
+      outboundFlights,
+      returnFlights,
+      priceData: rawData.priceData || [],
+      hasRealData: rawData.hasRealData ?? rawData._is_real_data ?? true,
+      preferences: normalizedWeights ? { preferences: normalizedWeights } : rawData.preferences,
+    };
   };
 
-  // Handle Generate Itinerary button click - navigate to itinerary page
   const handleGenerateItinerary = (messageContentOrData) => {
-    // Try to parse as JSON first (if it contains route data from MessageBubble)
     let routeData = null;
     let messageContent = messageContentOrData;
-    
+
     try {
       routeData = JSON.parse(messageContentOrData);
       if (routeData.messageContent) {
         messageContent = routeData.messageContent;
       }
     } catch (e) {
-      // Not JSON, treat as plain message content
       messageContent = messageContentOrData;
     }
-    
-    // Use dashboardData if available (most reliable)
-    if (dashboardData && dashboardData.route) {
-      // Navigate with existing dashboard data
-      navigate('/itinerary', {
-        state: {
-          routeInfo: dashboardData.route,
-          flights: dashboardData.flights || [],
-          outboundFlights: dashboardData.outboundFlights || [],
-          returnFlights: dashboardData.returnFlights || [],
-          preferences: userPreferences ? { preferences: userPreferences } : null
-        }
+
+    const dashboardSource =
+      (dashboardData && dashboardData.route)
+        ? dashboardData
+        : latestItineraryDataRef.current && latestItineraryDataRef.current.route
+        ? latestItineraryDataRef.current
+        : null;
+
+    if (dashboardSource && dashboardSource.route) {
+      mergeTripContext({
+        origin: dashboardSource.route.departure,
+        destination: dashboardSource.route.destination,
+        originCode: dashboardSource.route.departureCode,
+        destinationCode: dashboardSource.route.destinationCode,
+        departureDate: dashboardSource.route.date || dashboardSource.route.departure_display,
+        returnDate: dashboardSource.route.returnDate || dashboardSource.route.return_display || null,
+      });
+
+      navigateToItinerary(dashboardSource.route, {
+        flights: dashboardSource.flights && dashboardSource.flights.length > 0
+          ? dashboardSource.flights
+          : dashboardSource.outboundFlights || [],
+        outboundFlights: dashboardSource.outboundFlights || [],
+        returnFlights: dashboardSource.returnFlights || [],
+        priceData: dashboardSource.priceData || [],
       });
       return;
     }
-    
-    // Extract from routeData if available (from MessageBubble table extraction)
+
     if (routeData && routeData.flightSummary) {
       const summary = routeData.flightSummary;
-      // Extract from message content if summary doesn't have all info
       const msgContent = routeData.messageContent || messageContent;
-      
-      // Try to extract route from message patterns
+
       const routeMatch = msgContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
       let departure = summary.originCity || summary.origin || 'Unknown';
       let destination = summary.destCity || summary.destination || 'Unknown';
       let departureCode = summary.originCode || '';
       let destinationCode = summary.destCode || '';
-      
+
       if (routeMatch) {
         departure = routeMatch[1].trim();
         destination = routeMatch[2].trim().split(/\s+/)[0];
       }
-      
-      // Try to extract airport codes from message
+
       const codeMatch = msgContent.match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
       if (codeMatch && !departureCode && !destinationCode) {
         departureCode = codeMatch[1];
         destinationCode = codeMatch[2];
       }
-      
-      // Extract dates from message
+
       const datePatterns = [
         /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/gi,
         /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/gi,
       ];
       const dateMatches = [];
-      datePatterns.forEach(pattern => {
+      datePatterns.forEach((pattern) => {
         const matches = msgContent.match(pattern);
         if (matches) dateMatches.push(...matches);
       });
-      
+
       let departureDate = summary.departureDate || null;
       let returnDate = summary.returnDate || null;
-      
+
       if (dateMatches.length > 0 && !departureDate) {
         departureDate = dateMatches[0];
       }
       if (dateMatches.length > 1 && !returnDate) {
         returnDate = dateMatches[1];
       }
-      
+
       const routeInfo = {
-        departure: departure,
-        destination: destination,
-        departureCode: departureCode,
-        destinationCode: destinationCode,
-        date: departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        returnDate: returnDate || null
+        departure,
+        destination,
+        departureCode,
+        destinationCode,
+        date:
+          departureDate ||
+          new Date().toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+          }),
+        returnDate: returnDate || null,
       };
-      
-      navigate('/itinerary', {
-        state: {
-          routeInfo: routeInfo,
-          flights: [],
-          outboundFlights: [],
-          returnFlights: [],
-          preferences: userPreferences ? { preferences: userPreferences } : null
-        }
+
+      const cachedFlights =
+        latestItineraryDataRef.current?.flights ||
+        latestItineraryDataRef.current?.outboundFlights ||
+        [];
+
+      navigateToItinerary(routeInfo, {
+        flights: cachedFlights,
+        outboundFlights: latestItineraryDataRef.current?.outboundFlights || [],
+        returnFlights: latestItineraryDataRef.current?.returnFlights || [],
       });
       return;
     }
-    
-    // Fallback: Extract from message content
-    const tripInfo = extractTripInfo(messageContent);
-    
-    // Try to extract route info from message patterns
-    const routeMatch = messageContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
-    let departure = 'Unknown';
-    let destination = 'Unknown';
-    let departureCode = '';
-    let destinationCode = '';
-    
+
+    const tripInfo = extractTripInfo(messageContent || '');
+
+    if (
+      tripInfo.origin ||
+      tripInfo.destination ||
+      tripInfo.departureDate ||
+      tripInfo.returnDate
+    ) {
+      mergeTripContext(tripInfo);
+    }
+
+    let departure = tripInfo.origin || tripContext?.origin || 'Unknown';
+    let destination = tripInfo.destination || tripContext?.destination || 'Unknown';
+    let departureCode = tripContext?.originCode || '';
+    let destinationCode = tripContext?.destinationCode || '';
+
+    const routeMatch = (messageContent || '').match(
+      /\bfrom\s+([A-Za-z0-9&.\-' ]+?)\s+(?:to|→|->)\s+([A-Za-z0-9&.\-' ]+?)(?=$|[\.!,])/i,
+    );
     if (routeMatch) {
-      departure = routeMatch[1].trim();
-      destination = routeMatch[2].trim().split(/\s+/)[0]; // Get first word after "to"
+      departure = cleanPlaceString(routeMatch[1]) || departure;
+      destination = cleanPlaceString(routeMatch[2]) || destination;
     }
-    
-    // Try to extract airport codes (e.g., "IAD → BCN" or "JFK to CDG")
-    const codeMatch = messageContent.match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
+
+    const codeMatch = (messageContent || '').match(/([A-Z]{3})\s*[→-]\s*([A-Z]{3})/);
     if (codeMatch) {
-      departureCode = codeMatch[1];
-      destinationCode = codeMatch[2];
-    }
-    
-    const routeInfo = {
-      departure: departure,
-      destination: tripInfo.destination || destination,
-      departureCode: departureCode,
-      destinationCode: destinationCode,
-      date: tripInfo.departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      returnDate: tripInfo.returnDate || null
-    };
-    
-    navigate('/itinerary', {
-      state: {
-        routeInfo: routeInfo,
-        flights: [],
-        outboundFlights: [],
-        returnFlights: [],
-        preferences: userPreferences ? { preferences: userPreferences } : null
+      if (!departureCode) {
+        departureCode = codeMatch[1];
       }
-    });
+      if (!destinationCode) {
+        destinationCode = codeMatch[2];
+      }
+    }
+
+    const departureDateValue =
+      tripInfo.departureDate ||
+      tripContext?.departureDate ||
+      new Date().toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    const returnDateValue = tripInfo.returnDate || tripContext?.returnDate || null;
+
+    if (!destination || destination === 'Unknown') {
+      setError('I need a destination to generate the itinerary. Please share where you want to go.');
+      return;
+    }
+
+    const routeInfo = {
+      departure: departure || 'Unknown',
+      destination,
+      departureCode,
+      destinationCode,
+      date: departureDateValue,
+      returnDate: returnDateValue,
+    };
+
+    mergeTripContext(routeInfo);
+
+    navigateToItinerary(routeInfo);
   };
 
-  // Handle Save Trip button click
   const handleSaveTrip = (messageContent) => {
-    const tripInfo = extractTripInfo(messageContent);
+    const tripInfo = extractTripInfo(messageContent || '');
     const destination = tripInfo.destination || 'your destination';
     let dates = tripInfo.departureDate ? ` for ${tripInfo.departureDate}` : '';
     if (tripInfo.returnDate) {
@@ -713,20 +808,27 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     handleSend(message);
   };
 
+  const itineraryEligible = useMemo(() => {
+    return Object.values(requestedCategories).filter(Boolean).length >= 2;
+  }, [requestedCategories]);
+
   const rendered = useMemo(() => messages.map((m, idx) => (
     <MessageBubble 
       key={idx} 
       role={m.role} 
       content={m.content} 
       timestamp={m.timestamp}
-      onGenerateItinerary={m.role === 'assistant' ? (messageContent) => handleGenerateItinerary(messageContent) : null}
+      onGenerateItinerary={m.role === 'assistant' && itineraryEligible ? (messageContent) => handleGenerateItinerary(messageContent) : null}
       onSaveTrip={m.role === 'assistant' ? (messageContent) => handleSaveTrip(messageContent) : null}
     />
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  )), [messages, dashboardData, userPreferences]);
+  )), [messages, dashboardData, userPreferences, itineraryEligible]);
 
-  // Show onboarding form if not completed
   if (!onboardingComplete) {
+    // When showing onboarding we explicitly clear stored chat state to start fresh
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.removeItem(CHAT_STORAGE_KEY);
+    }
+
     return (
       <div className="chat-page" style={{ 
         minHeight: '100vh', 
@@ -758,7 +860,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           </div>
         </header>
         <div style={{ marginTop: '40px' }}>
-          <TripPreferencesForm onComplete={handleOnboardingComplete} />
+          <TripPreferencesForm onComplete={handleOnboardingComplete} defaultRawValues={rawPreferenceValues} />
         </div>
       </div>
     );
@@ -783,50 +885,26 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 <h1 className="chat-title">Miles</h1>
                 <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
-                  Online • Ready to help plan your trip
+                  Online • Ready to plan your trip
                 </p>
               </div>
             </div>
           </div>
         </div>
       </header>
-
-      <div className="chat-messages" ref={scrollRef}>
-        <div className="container">
+      <div className="chat-content">
+        <div className="chat-messages" ref={scrollRef}>
           {rendered}
           {isTyping && (
-            <div className="message-row">
-              <div className="avatar avatar-assistant">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <circle cx="8" cy="8" r="8" fill="#00ADEF"/>
-                </svg>
-              </div>
-              <div className="typing">
-                <span className="dot" />
-                <span className="dot" />
-                <span className="dot" />
-              </div>
-            </div>
-          )}
-          {error && (
-            <div className="card" style={{ padding: 12, marginTop: 8 }}>
-              <div className="muted">{error}</div>
+            <div className="typing">
+              <span className="dot"></span>
+              <span className="dot"></span>
+              <span className="dot"></span>
             </div>
           )}
         </div>
-      </div>
-
-      <div className="chat-input-dock">
-        <div className="container">
-          {messages.length === 1 && (
-            <div className="quick-replies">
-              {quickReplies.map((text, idx) => (
-                <button key={idx} className="quick-reply-btn" onClick={() => handleSend(text)}>
-                  {text}
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="chat-input-dock">
+          {error && <div className="error-message">{error}</div>}
           <ChatInput onSend={handleSend} disabled={isTyping} />
         </div>
       </div>

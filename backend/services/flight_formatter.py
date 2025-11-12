@@ -7,6 +7,8 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 import logging
 
+from .scoring import calculate_total_score, normalize_weights
+
 logger = logging.getLogger(__name__)
 
 def format_flight_for_dashboard(
@@ -142,24 +144,63 @@ def format_flight_for_dashboard(
             min_duration = min(durations_hours) if durations_hours else 1
             max_duration = max(durations_hours) if durations_hours else 1
             
-            # Calculate scores for outbound flights
+            normalized_weights = normalize_weights(user_preferences)
+
+            def _score_flight(flight: Dict[str, Any]) -> None:
+                price = flight.get("price", max_price)
+                if max_price > min_price:
+                    budget_score = max(0.0, min(100.0, ((max_price - price) / (max_price - min_price)) * 100))
+                else:
+                    budget_score = 50.0
+
+                stops = flight.get("stops", 0) or 0
+                if stops <= 0:
+                    quality_score = 100.0
+                elif stops == 1:
+                    quality_score = 70.0
+                else:
+                    quality_score = max(0.0, 40.0 - (stops - 2) * 10.0)
+
+                duration_str = flight.get("duration", "0h 0m")
+                duration_hours = _parse_duration_to_hours(duration_str)
+                if max_duration > min_duration:
+                    convenience_score = max(
+                        0.0,
+                        min(100.0, ((max_duration - duration_hours) / (max_duration - min_duration)) * 100),
+                    )
+                else:
+                    convenience_score = 50.0
+
+                score_components = {
+                    'budget': budget_score,
+                    'quality': quality_score,
+                    'convenience': convenience_score,
+                }
+
+                total_score = calculate_total_score(score_components, normalized_weights)
+                flight['preferenceScore'] = total_score
+                flight['totalScore'] = total_score
+                flight['scoreComponents'] = score_components
+                flight['weights'] = normalized_weights
+                logger.info(
+                    "[FLIGHT_FORMATTER] Weighted score for %s: total=%.2f (budget=%.1f, quality=%.1f, convenience=%.1f)",
+                    flight.get('flightNumber'),
+                    total_score,
+                    score_components['budget'],
+                    score_components['quality'],
+                    score_components['convenience'],
+                )
+
             for flight in formatted_response["outboundFlights"]:
-                score = _calculate_preference_score(
-                    flight, user_preferences, min_price, max_price, min_duration, max_duration
-                )
-                flight['preferenceScore'] = score
-                logger.info(f"[FLIGHT_FORMATTER] Flight {flight.get('flightNumber')} preference score: {score:.4f}")
-            
-            # Calculate scores for return flights
+                _score_flight(flight)
+
             for flight in formatted_response["returnFlights"]:
-                score = _calculate_preference_score(
-                    flight, user_preferences, min_price, max_price, min_duration, max_duration
-                )
-                flight['preferenceScore'] = score
-            
+                _score_flight(flight)
+
             # Sort by preference score (higher is better)
             formatted_response["outboundFlights"].sort(key=lambda x: x.get('preferenceScore', 0), reverse=True)
             formatted_response["returnFlights"].sort(key=lambda x: x.get('preferenceScore', 0), reverse=True)
+            formatted_response['preferences'] = normalized_weights
             
             logger.info(f"[FLIGHT_FORMATTER] Top outbound flight after sorting: {formatted_response['outboundFlights'][0].get('flightNumber') if formatted_response['outboundFlights'] else 'None'} (score: {formatted_response['outboundFlights'][0].get('preferenceScore', 0) if formatted_response['outboundFlights'] else 0})")
     else:
@@ -419,71 +460,6 @@ def _parse_duration_to_hours(duration_str: str) -> float:
         return hours + (minutes / 60.0)
     
     return 0.0
-
-def _calculate_preference_score(
-    flight: Dict[str, Any],
-    preferences: Dict[str, float],
-    min_price: float,
-    max_price: float,
-    min_duration: float,
-    max_duration: float
-) -> float:
-    """
-    Calculate preference score for a flight based on user preferences
-    
-    Score formula:
-    score = budget_weight * normalized_price_score + 
-            quality_weight * normalized_quality_score + 
-            convenience_weight * normalized_convenience_score
-    
-    Where:
-    - normalized_price_score: (max_price - price) / (max_price - min_price) [lower price is better]
-    - normalized_quality_score: based on stops (non-stop = 1.0, 1 stop = 0.7, 2+ stops = 0.4) and airline rating
-    - normalized_convenience_score: (max_duration - duration) / (max_duration - min_duration) [shorter is better]
-    """
-    budget_weight = preferences.get('budget', 0.33)
-    quality_weight = preferences.get('quality', 0.33)
-    convenience_weight = preferences.get('convenience', 0.34)
-    
-    # Normalize price score (lower price = higher score)
-    price = flight.get('price', max_price)
-    if max_price > min_price:
-        normalized_price_score = (max_price - price) / (max_price - min_price)
-    else:
-        normalized_price_score = 0.5  # Default if all prices are same
-    
-    # Calculate quality score (based on stops - fewer stops = higher quality)
-    stops = flight.get('stops', 0)
-    if stops == 0:
-        quality_score = 1.0  # Non-stop is best
-    elif stops == 1:
-        quality_score = 0.7  # 1 stop is acceptable
-    else:
-        quality_score = 0.4  # 2+ stops is lower quality
-    
-    # Normalize convenience score (shorter duration = higher score)
-    duration_str = flight.get('duration', '0h 0m')
-    duration_hours = _parse_duration_to_hours(duration_str)
-    
-    if max_duration > min_duration:
-        normalized_convenience_score = (max_duration - duration_hours) / (max_duration - min_duration)
-    else:
-        normalized_convenience_score = 0.5  # Default if all durations are same
-    
-    # Calculate weighted score
-    total_score = (
-        budget_weight * normalized_price_score +
-        quality_weight * quality_score +
-        convenience_weight * normalized_convenience_score
-    )
-    
-    logger.debug(f"[FLIGHT_FORMATTER] Score calculation for {flight.get('flightNumber')}: "
-                f"price_score={normalized_price_score:.3f} (weight={budget_weight}), "
-                f"quality_score={quality_score:.3f} (weight={quality_weight}), "
-                f"convenience_score={normalized_convenience_score:.3f} (weight={convenience_weight}), "
-                f"total={total_score:.3f}")
-    
-    return total_score
 
 def _generate_price_trend_data(
     prices: List[float],
