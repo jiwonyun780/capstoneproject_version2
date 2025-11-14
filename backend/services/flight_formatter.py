@@ -172,6 +172,40 @@ def format_flight_for_dashboard(
     _mark_best_deals(formatted_response["outboundFlights"])
     _mark_best_deals(formatted_response["returnFlights"])
     
+    # CRITICAL: Filter out placeholder rows with '---' values before returning
+    def is_placeholder_value(value):
+        """Check if a value is a placeholder (hyphens, dashes, or empty)"""
+        if not value:
+            return True
+        trimmed = str(value).strip()
+        return trimmed == '' or trimmed == '---' or trimmed == '--' or trimmed == '-' or trimmed.lower() == 'n/a' or trimmed == 'null' or trimmed == 'undefined'
+    
+    def is_placeholder_flight(flight):
+        """Check if a flight is a placeholder/dummy row"""
+        if not flight:
+            return True
+        airline = is_placeholder_value(flight.get('airline', ''))
+        flight_number = is_placeholder_value(flight.get('flightNumber', ''))
+        departure = is_placeholder_value(flight.get('departure', ''))
+        arrival = is_placeholder_value(flight.get('arrival', ''))
+        duration = is_placeholder_value(flight.get('duration', ''))
+        price = flight.get('price', 0)
+        has_valid_price = price and price > 0 and not (isinstance(price, float) and price != price)  # Check for NaN
+        
+        # If ALL main fields are placeholders, it's a dummy row
+        if airline and flight_number and departure and arrival and duration:
+            return True
+        # If price is invalid AND all other fields are placeholders
+        if not has_valid_price and airline and flight_number and departure and arrival and duration:
+            return True
+        return False
+    
+    # Filter out placeholder flights from both outbound and return
+    formatted_response["outboundFlights"] = [f for f in formatted_response["outboundFlights"] if not is_placeholder_flight(f)]
+    formatted_response["returnFlights"] = [f for f in formatted_response["returnFlights"] if not is_placeholder_flight(f)]
+    
+    logger.info(f"[FLIGHT_FORMATTER] After filtering placeholders: {len(formatted_response['outboundFlights'])} outbound, {len(formatted_response['returnFlights'])} return flights")
+    
     return formatted_response
 
 def _format_single_flight(

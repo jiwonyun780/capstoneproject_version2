@@ -10,15 +10,71 @@ import {
   TableRow,
 } from '../ui/table';
 
+// Helper function to check if a value is a placeholder (hyphens, dashes, or empty)
+const isPlaceholderValue = (value) => {
+  if (!value) return true;
+  const trimmed = String(value).trim();
+  // Check for various placeholder patterns: '---', '--', '-', 'N/A', 'n/a', empty string
+  return trimmed === '' || 
+         trimmed === '---' || 
+         trimmed === '--' || 
+         trimmed === '-' || 
+         trimmed.toLowerCase() === 'n/a' ||
+         trimmed === 'null' ||
+         trimmed === 'undefined';
+};
+
+// Helper function to check if a flight is a placeholder/dummy row
+const isPlaceholderRow = (flight) => {
+  if (!flight) return true;
+  
+  // Check all key fields for placeholder values
+  const airline = isPlaceholderValue(flight.airline);
+  const flightNumber = isPlaceholderValue(flight.flightNumber);
+  const departure = isPlaceholderValue(flight.departure);
+  const arrival = isPlaceholderValue(flight.arrival);
+  const duration = isPlaceholderValue(flight.duration);
+  
+  // If ALL main fields are placeholders, it's a dummy row
+  if (airline && flightNumber && departure && arrival && duration) {
+    return true;
+  }
+  
+  // Also check if price is invalid (0, null, undefined, or NaN)
+  const price = flight.price;
+  if (price === undefined || price === null || price === 0 || isNaN(price)) {
+    // If price is invalid AND all other fields are placeholders, it's a dummy row
+    if (airline && flightNumber && departure && arrival && duration) {
+      return true;
+    }
+  }
+  
+  return false;
+};
+
 export function FlightsTable({ flights }) {
-  // Filter out invalid or empty flights
+  // Filter out invalid, empty, or placeholder flights BEFORE rendering
   const validFlights = (flights || []).filter(flight => {
-    return flight && 
-           flight.id && 
-           flight.airline && 
-           flight.flightNumber && 
-           flight.price !== undefined && 
-           flight.price !== null;
+    // Basic validation
+    if (!flight || !flight.id) {
+      return false;
+    }
+    
+    // CRITICAL: Filter out any placeholder/dummy rows with '---' values
+    if (isPlaceholderRow(flight)) {
+      console.log('[FlightsTable] Filtered out placeholder row:', flight);
+      return false;
+    }
+    
+    // Standard validation - ensure required fields exist and are not placeholders
+    const hasValidAirline = flight.airline && !isPlaceholderValue(flight.airline);
+    const hasValidFlightNumber = flight.flightNumber && !isPlaceholderValue(flight.flightNumber);
+    const hasValidPrice = flight.price !== undefined && 
+                         flight.price !== null && 
+                         flight.price > 0 && 
+                         !isNaN(flight.price);
+    
+    return hasValidAirline && hasValidFlightNumber && hasValidPrice;
   });
   
   if (validFlights.length === 0) {

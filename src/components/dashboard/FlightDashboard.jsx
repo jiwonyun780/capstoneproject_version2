@@ -5,6 +5,52 @@ import { PriceChart } from './PriceChart';
 import { FlightsTable } from './FlightsTable';
 import { ScrollArea } from '../ui/scroll-area';
 
+// Helper function to filter out placeholder rows with '---' values
+const filterPlaceholderRows = (flights) => {
+  if (!flights || !Array.isArray(flights)) {
+    return [];
+  }
+  
+  return flights.filter(flight => {
+    if (!flight || !flight.id) {
+      return false;
+    }
+    
+    // Check if all key fields are placeholders
+    const isPlaceholder = (value) => {
+      if (!value) return true;
+      const trimmed = String(value).trim();
+      return trimmed === '' || 
+             trimmed === '---' || 
+             trimmed === '--' || 
+             trimmed === '-' || 
+             trimmed.toLowerCase() === 'n/a' ||
+             trimmed === 'null' ||
+             trimmed === 'undefined';
+    };
+    
+    const airline = isPlaceholder(flight.airline);
+    const flightNumber = isPlaceholder(flight.flightNumber);
+    const departure = isPlaceholder(flight.departure);
+    const arrival = isPlaceholder(flight.arrival);
+    const duration = isPlaceholder(flight.duration);
+    
+    // If ALL main fields are placeholders, filter it out
+    if (airline && flightNumber && departure && arrival && duration) {
+      console.log('[FlightDashboard] Filtered out placeholder row before rendering:', flight);
+      return false;
+    }
+    
+    // Also check for valid price
+    const hasValidPrice = flight.price !== undefined && 
+                         flight.price !== null && 
+                         flight.price > 0 && 
+                         !isNaN(flight.price);
+    
+    return hasValidPrice && !airline && !flightNumber;
+  });
+};
+
 // Mock data for demonstration - this will be replaced with real Amadeus API data
 const generateMockPriceData = (startDate = new Date()) => {
   const basePrice = 380;
@@ -186,36 +232,45 @@ export function FlightDashboard({ searchData = null }) {
         <PriceChart key={`price-chart-${displayPriceData[0]?.date}-${displayPriceData[0]?.price}`} data={displayPriceData} />
 
                {/* Outbound Flights Table */}
-               {searchData?.outboundFlights && searchData.outboundFlights.length > 0 && (
-                 <div className="mb-6">
-                   <h3 className="text-lg font-semibold mb-3 text-gray-800">
-                     Outbound Flights - {routeInfo.departure} to {routeInfo.destination} ({routeInfo.departure_display || routeInfo.date})
-                   </h3>
-                   <FlightsTable 
-                     key={`outbound-flights-${searchData.outboundFlights[0]?.id}-${searchData.outboundFlights[0]?.price}`} 
-                     flights={searchData.outboundFlights} 
-                   />
-                 </div>
-               )}
+               {searchData?.outboundFlights && searchData.outboundFlights.length > 0 && (() => {
+                 const filteredOutboundFlights = filterPlaceholderRows(searchData.outboundFlights);
+                 return filteredOutboundFlights.length > 0 ? (
+                   <div className="mb-6">
+                     <h3 className="text-lg font-semibold mb-3 text-gray-800">
+                       Outbound Flights - {routeInfo.departure} to {routeInfo.destination} ({routeInfo.departure_display || routeInfo.date})
+                     </h3>
+                     <FlightsTable 
+                       key={`outbound-flights-${filteredOutboundFlights[0]?.id}-${filteredOutboundFlights[0]?.price}`} 
+                       flights={filteredOutboundFlights} 
+                     />
+                   </div>
+                 ) : null;
+               })()}
 
                {/* Return Flights Table */}
-               {searchData?.returnFlights && searchData.returnFlights.length > 0 && (
-                 <div className="mb-6">
-                   <h3 className="text-lg font-semibold mb-3 text-gray-800">
-                     Return Flights - {routeInfo.destination} to {routeInfo.departure} ({routeInfo.return_display})
-                   </h3>
-                   <FlightsTable 
-                     key={`return-flights-${searchData.returnFlights[0]?.id}-${searchData.returnFlights[0]?.price}`} 
-                     flights={searchData.returnFlights} 
-                   />
-                 </div>
-               )}
+               {searchData?.returnFlights && searchData.returnFlights.length > 0 && (() => {
+                 const filteredReturnFlights = filterPlaceholderRows(searchData.returnFlights);
+                 return filteredReturnFlights.length > 0 ? (
+                   <div className="mb-6">
+                     <h3 className="text-lg font-semibold mb-3 text-gray-800">
+                       Return Flights - {routeInfo.destination} to {routeInfo.departure} ({routeInfo.return_display})
+                     </h3>
+                     <FlightsTable 
+                       key={`return-flights-${filteredReturnFlights[0]?.id}-${filteredReturnFlights[0]?.price}`} 
+                       flights={filteredReturnFlights} 
+                     />
+                   </div>
+                 ) : null;
+               })()}
 
         {/* Fallback: Single Flights Table (for backward compatibility) */}
         {(!searchData?.outboundFlights || searchData.outboundFlights.length === 0) && 
-         (!searchData?.returnFlights || searchData.returnFlights.length === 0) && (
-          <FlightsTable key={`flights-table-${displayFlightsData[0]?.id}-${displayFlightsData[0]?.price}`} flights={displayFlightsData} />
-        )}
+         (!searchData?.returnFlights || searchData.returnFlights.length === 0) && (() => {
+           const filteredFlights = filterPlaceholderRows(displayFlightsData);
+           return filteredFlights.length > 0 ? (
+             <FlightsTable key={`flights-table-${filteredFlights[0]?.id}-${filteredFlights[0]?.price}`} flights={filteredFlights} />
+           ) : null;
+         })()}
 
         {/* Generate Itinerary / Save Trip Button */}
         <div style={{ 

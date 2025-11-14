@@ -420,7 +420,12 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null) 
         tableRows = [];
       }
       const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell);
-      if (cells.length > 0) {
+      
+      // Filter out header separator rows (rows where all cells are only hyphens)
+      // Pattern: ^-+$ means the cell contains only one or more hyphens
+      const isHeaderSeparator = cells.length > 0 && cells.every(cell => /^-+$/.test(cell));
+      
+      if (cells.length > 0 && !isHeaderSeparator) {
         tableRows.push(cells);
       }
     }

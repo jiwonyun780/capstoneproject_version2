@@ -134,138 +134,7 @@ def root():
 def health():
     return {"ok": True, "status": "healthy"}
 
-@app.get("/api/test")
-def test():
-    return {"message": "Backend is working", "timestamp": datetime.now().isoformat()}
-
-# Diagnostics for Amadeus integration
-@app.get("/api/diag/amadeus/location")
-async def diag_amadeus_location(keyword: str = "Paris"):
-    try:
-        logger.info(f"[DIAG] Testing Amadeus location search with keyword='{keyword}'")
-        result = amadeus_service.get_airport_city_search(keyword=keyword)
-        count = (result or {}).get("count", 0)
-        sample = None
-        if result and result.get("locations"):
-            sample = result["locations"][0]
-        return {"ok": True, "count": count, "sample": sample, "raw": result}
-    except Exception as e:
-        logger.error(f"[DIAG] Amadeus location search failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-@app.get("/api/diag/amadeus/flight")
-async def diag_amadeus_flight(origin: str = "PAR", destination: str = "TYO", date: str = "2025-12-01"):
-    try:
-        logger.info(f"[DIAG] Testing Amadeus flight search {origin}->{destination} on {date}")
-        result = amadeus_service.search_flights(origin=origin, destination=destination, departure_date=date)
-        count = (result or {}).get("count", 0)
-        sample = None
-        if result and result.get("flights"):
-            sample = result["flights"][0]
-        return {"ok": True, "count": count, "sample": sample, "raw": result}
-    except Exception as e:
-        logger.error(f"[DIAG] Amadeus flight search failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-@app.get("/api/diag/amadeus/flight-dates")
-async def diag_amadeus_flight_dates(origin: str = "PAR", destination: str = "TYO",
-                                    start: str = "2025-12-01", end: str = "2026-01-01"):
-    try:
-        date_range = f"{start},{end}"
-        logger.info(f"[DIAG] Testing Amadeus flight-dates {origin}->{destination} range {date_range}")
-        result = amadeus_service.get_cheapest_dates(
-            origin=origin,
-            destination=destination,
-            departure_date_range=date_range
-        )
-        return {
-            "ok": True,
-            "count": (result or {}).get("count", 0),
-            "dates": (result or {}).get("dates", [])[:10],
-            "raw": result
-        }
-    except Exception as e:
-        logger.error(f"[DIAG] Amadeus flight-dates failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-@app.get("/api/diag/amadeus/token")
-async def diag_amadeus_token():
-    try:
-        token = amadeus_service._get_access_token()
-        return {"ok": True, "token_present": bool(token), "token_prefix": token[:12] if token else None}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-@app.get("/api/diag/amadeus/inspiration")
-async def diag_amadeus_inspiration(origin: str = "PAR", maxPrice: int = 200):
-    try:
-        result = amadeus_service.get_flight_inspiration(origin=origin, max_price=maxPrice)
-        return {"ok": True, "count": (result or {}).get("count", 0), "sample": (result or {}).get("destinations", [])[:3], "raw": result}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-@app.get("/api/diag/flight-raw")
-async def diag_flight_raw(origin: str = "JFK", destination: str = "CDG", date: str = "2024-12-10"):
-    """Diagnostic endpoint to show raw Amadeus response vs formatted data"""
-    try:
-        logger.info(f"[DIAG] Testing flight search: {origin} -> {destination} on {date}")
-        
-        # Get raw Amadeus response
-        raw_response = amadeus_service._make_request("/v2/shopping/flight-offers", {
-            "originLocationCode": origin,
-            "destinationLocationCode": destination,
-            "departureDate": date,
-            "adults": 1
-        })
-        
-        # Get formatted response
-        formatted_response = amadeus_service._format_flight_response(raw_response)
-        
-        return {
-            "ok": True,
-            "api_base_url": amadeus_service.base_url,
-            "raw_response": raw_response,
-            "formatted_response": formatted_response,
-            "comparison": {
-                "raw_offers": len(raw_response.get("data", [])),
-                "formatted_flights": len(formatted_response.get("flights", [])),
-                "first_raw_offer": raw_response.get("data", [{}])[0] if raw_response.get("data") else None,
-                "first_formatted_flight": formatted_response.get("flights", [{}])[0] if formatted_response.get("flights") else None
-            }
-        }
-    except Exception as e:
-        logger.error(f"[DIAG] Flight raw test failed: {e}")
-        return {"ok": False, "error": str(e)}
-
-@app.post("/api/test-context")
-async def test_context(ctx: Context):
-    """Diagnostic endpoint to verify context parsing and processing"""
-    local_time = format_local_time(ctx.now_iso, ctx.user_tz)
-    loc_str = get_location_string(ctx.user_location)
-    
-    # Log the received context for debugging
-    logger.info(
-        "Received context: time=%s tz=%s city=%s country=%s lat=%s lon=%s",
-        ctx.now_iso, ctx.user_tz,
-        ctx.user_location.city, ctx.user_location.country,
-        ctx.user_location.lat, ctx.user_location.lon,
-    )
-    
-    return {
-        "ok": True,
-        "received": {
-            "now_iso": ctx.now_iso,
-            "user_tz": ctx.user_tz,
-            "local_time": local_time,
-            "location": loc_str,
-            "lat": ctx.user_location.lat,
-            "lon": ctx.user_location.lon,
-            "city": ctx.user_location.city,
-            "region": ctx.user_location.region,
-            "country": ctx.user_location.country,
-            "user_locale": ctx.user_locale
-        }
-    }
+# Removed diagnostic and test endpoints - not needed for production
 
 
 def format_local_time(now_iso, user_tz):
@@ -578,7 +447,38 @@ Output:
                 data_section += f"| Book Now | Airline | Flight Code | Origin | Destination | Price | Duration | Stops/Layover | Departure | Arrival |\n"
                 data_section += f"|----------|---------|-------------|--------|-------------|-------|----------|----------------|-----------|----------|\n"
                 
-                for flight in amadeus_data['outboundFlights'][:5]:  # Show up to 5 flights
+                # Filter out placeholder rows with '---' values before rendering
+                def is_placeholder_value(value):
+                    """Check if a value is a placeholder (hyphens, dashes, or empty)"""
+                    if not value:
+                        return True
+                    trimmed = str(value).strip()
+                    return trimmed == '' or trimmed == '---' or trimmed == '--' or trimmed == '-' or trimmed.lower() == 'n/a' or trimmed == 'null' or trimmed == 'undefined'
+                
+                def is_placeholder_flight(flight):
+                    """Check if a flight is a placeholder/dummy row"""
+                    if not flight:
+                        return True
+                    airline = is_placeholder_value(flight.get('airline', ''))
+                    flight_number = is_placeholder_value(flight.get('flightNumber', ''))
+                    departure = is_placeholder_value(flight.get('departure', ''))
+                    arrival = is_placeholder_value(flight.get('arrival', ''))
+                    duration = is_placeholder_value(flight.get('duration', ''))
+                    price = flight.get('price', 0)
+                    has_valid_price = price and price > 0 and not (isinstance(price, float) and price != price)  # Check for NaN
+                    
+                    # If ALL main fields are placeholders, it's a dummy row
+                    if airline and flight_number and departure and arrival and duration:
+                        return True
+                    # If price is invalid AND all other fields are placeholders
+                    if not has_valid_price and airline and flight_number and departure and arrival and duration:
+                        return True
+                    return False
+                
+                # Filter out placeholder flights
+                valid_outbound_flights = [f for f in amadeus_data.get('outboundFlights', []) if not is_placeholder_flight(f)]
+                
+                for flight in valid_outbound_flights[:5]:  # Show up to 5 flights
                     # Extract flight code from flightNumber (e.g., "AF 123" -> "AF123")
                     flight_code = flight.get('flightNumber', '').replace(' ', '')
                     
@@ -632,7 +532,10 @@ Output:
                     data_section += f"| Book Now | Airline | Flight Code | Origin | Destination | Price | Duration | Stops/Layover | Departure | Arrival |\n"
                     data_section += f"|----------|---------|-------------|--------|-------------|-------|----------|----------------|-----------|----------|\n"
                     
-                    for flight in amadeus_data['returnFlights'][:5]:
+                    # Filter out placeholder flights (reuse the helper functions defined above)
+                    valid_return_flights = [f for f in amadeus_data.get('returnFlights', []) if not is_placeholder_flight(f)]
+                    
+                    for flight in valid_return_flights[:5]:
                         flight_code = flight.get('flightNumber', '').replace(' ', '')
                         
                         # Get origin and destination airports from flight metadata or segments
