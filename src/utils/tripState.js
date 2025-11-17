@@ -1,4 +1,5 @@
 const TRIP_STATE_KEY = 'sta_trip_state_v1';
+const OPTIMIZED_ITINERARY_KEY = 'miles:lastOptimizedItinerary';
 
 const defaultTripState = {
   flights: [],
@@ -16,8 +17,15 @@ const defaultTripState = {
   selectedOutboundFlight: null,  // User-selected outbound flight
   selectedReturnFlight: null,    // User-selected return flight
   selectedHotel: null,            // User-selected hotel
+  optimizedItinerary: null,        // Full optimized itinerary object from backend
   filters: {
     activityBudgetMax: null,
+    // Hotel preferences
+    hotelPriceMax: null,
+    hotelPriceMin: null,
+    hotelMinimumRating: null,
+    hotelPreferredLocation: null,
+    hotelSpecificName: null,
   },
   preferences: {
     guidedTour: false,
@@ -183,16 +191,18 @@ export const updateTripRoute = (route) => {
     },
   };
 
-  if (route.departure) {
+  // Only update if the new value is not null/undefined and not empty
+  // Don't overwrite existing valid data with null/empty values
+  if (route.departure !== null && route.departure !== undefined && route.departure.trim() !== '' && route.departure !== 'Unknown') {
     nextState.origin = route.departure;
   }
-  if (route.destination) {
+  if (route.destination !== null && route.destination !== undefined && route.destination.trim() !== '' && route.destination !== 'Unknown') {
     nextState.destination = route.destination;
   }
-  if (route.departureCode) {
+  if (route.departureCode !== null && route.departureCode !== undefined && route.departureCode.trim() !== '') {
     nextState.originCode = route.departureCode;
   }
-  if (route.destinationCode) {
+  if (route.destinationCode !== null && route.destinationCode !== undefined && route.destinationCode.trim() !== '') {
     nextState.destinationCode = route.destinationCode;
   }
   if (route.date) {
@@ -231,6 +241,76 @@ export const recordBudgetConstraint = (amount) => {
     return loadTripState();
   }
   return updateTripFilters({ activityBudgetMax: numeric, budget: numeric });
+};
+
+/**
+ * Update hotel preferences in TripState
+ * @param {Object} hotelPrefs - Hotel preference object
+ * @param {number} hotelPrefs.priceMax - Maximum price per night
+ * @param {number} hotelPrefs.priceMin - Minimum price per night
+ * @param {number} hotelPrefs.minimumRating - Minimum rating (e.g., 4.5)
+ * @param {string} hotelPrefs.preferredLocation - Preferred location (e.g., "Las Ramblas", "waterfront", "city center")
+ * @param {string} hotelPrefs.specificName - Specific hotel name the user wants to stay at
+ */
+export const updateHotelPreferences = (hotelPrefs = {}) => {
+  if (!hotelPrefs || typeof hotelPrefs !== 'object') {
+    return loadTripState();
+  }
+  
+  const updates = {};
+  
+  // Handle priceMax
+  if (hotelPrefs.priceMax !== undefined && hotelPrefs.priceMax !== null) {
+    const priceMax = typeof hotelPrefs.priceMax === 'number' 
+      ? hotelPrefs.priceMax 
+      : Number(String(hotelPrefs.priceMax).replace(/[^0-9.]/g, ''));
+    if (Number.isFinite(priceMax) && priceMax > 0) {
+      updates.hotelPriceMax = priceMax;
+    }
+  }
+  
+  // Handle priceMin
+  if (hotelPrefs.priceMin !== undefined && hotelPrefs.priceMin !== null) {
+    const priceMin = typeof hotelPrefs.priceMin === 'number' 
+      ? hotelPrefs.priceMin 
+      : Number(String(hotelPrefs.priceMin).replace(/[^0-9.]/g, ''));
+    if (Number.isFinite(priceMin) && priceMin > 0) {
+      updates.hotelPriceMin = priceMin;
+    }
+  }
+  
+  // Handle minimumRating
+  if (hotelPrefs.minimumRating !== undefined && hotelPrefs.minimumRating !== null) {
+    const rating = typeof hotelPrefs.minimumRating === 'number' 
+      ? hotelPrefs.minimumRating 
+      : Number(String(hotelPrefs.minimumRating).replace(/[^0-9.]/g, ''));
+    if (Number.isFinite(rating) && rating >= 0 && rating <= 5) {
+      updates.hotelMinimumRating = rating;
+    }
+  }
+  
+  // Handle preferredLocation
+  if (hotelPrefs.preferredLocation !== undefined && hotelPrefs.preferredLocation !== null) {
+    const location = String(hotelPrefs.preferredLocation).trim();
+    if (location.length > 0) {
+      updates.hotelPreferredLocation = location;
+    }
+  }
+  
+  // Handle specific hotel name
+  if (hotelPrefs.specificName !== undefined && hotelPrefs.specificName !== null) {
+    const name = String(hotelPrefs.specificName).trim();
+    if (name.length > 0) {
+      updates.hotelSpecificName = name;
+    }
+  }
+  
+  if (Object.keys(updates).length === 0) {
+    return loadTripState();
+  }
+  
+  console.log('Updating hotel preferences:', updates);
+  return updateTripFilters(updates);
 };
 
 export const recordMustDoActivities = (activities) => {
@@ -351,6 +431,34 @@ export const clearConversation = () => {
   return state;
 };
 
+// Reset all trip data (conversation + tripState) - for starting a new trip
+export const resetAllTripData = () => {
+  // Clear conversation first
+  clearConversation();
+  
+  // Clear current itinerary before clearing trip state
+  clearCurrentItinerary();
+  
+  // Clear optimized itinerary
+  clearOptimizedItinerary();
+  
+  // Clear trip state completely (this will reset everything to default)
+  clearTripState();
+  
+  // Ensure sessionStorage is completely cleared for trip state
+  const win = ensureWindow();
+  if (win) {
+    try {
+      win.sessionStorage.removeItem(TRIP_STATE_KEY);
+    } catch (err) {
+      console.warn('Unable to clear trip state from sessionStorage', err);
+    }
+  }
+  
+  // Return fresh default state
+  return { ...defaultTripState, lastUpdated: new Date().toISOString() };
+};
+
 // Select outbound flight (user selection)
 export const selectOutboundFlight = (flight) => {
   if (!flight) return loadTripState();
@@ -390,5 +498,80 @@ export const selectHotel = (hotel) => {
   });
 };
 
-export { TRIP_STATE_KEY };
+// Save optimized itinerary to both tripState and localStorage
+export const saveOptimizedItinerary = (itineraryData) => {
+  if (!itineraryData) {
+    console.warn('saveOptimizedItinerary: No itinerary data provided');
+    return loadTripState();
+  }
+  
+  const state = loadTripState();
+  const updatedState = saveTripState({
+    ...state,
+    optimizedItinerary: itineraryData,
+  });
+  
+  // Also save to localStorage for persistence across sessions
+  const win = ensureWindow();
+  if (win) {
+    try {
+      const dataToSave = {
+        optimizedItinerary: itineraryData,
+        selectedOutboundFlight: state.selectedOutboundFlight,
+        selectedReturnFlight: state.selectedReturnFlight,
+        selectedHotel: state.selectedHotel,
+        mustDoActivities: state.mustDoActivities,
+        preferenceWeights: state.preferenceWeights,
+        savedAt: new Date().toISOString(),
+      };
+      win.localStorage.setItem(OPTIMIZED_ITINERARY_KEY, JSON.stringify(dataToSave));
+      console.log('Saved optimized itinerary to localStorage');
+    } catch (err) {
+      console.warn('Unable to save optimized itinerary to localStorage', err);
+    }
+  }
+  
+  return updatedState;
+};
+
+// Load optimized itinerary from localStorage
+export const loadOptimizedItinerary = () => {
+  const win = ensureWindow();
+  if (!win) return null;
+  
+  try {
+    const raw = win.localStorage.getItem(OPTIMIZED_ITINERARY_KEY);
+    if (!raw) return null;
+    
+    const parsed = JSON.parse(raw);
+    return parsed;
+  } catch (err) {
+    console.warn('Unable to load optimized itinerary from localStorage', err);
+    return null;
+  }
+};
+
+// Clear optimized itinerary from both tripState and localStorage
+export const clearOptimizedItinerary = () => {
+  const state = loadTripState();
+  const updatedState = saveTripState({
+    ...state,
+    optimizedItinerary: null,
+  });
+  
+  // Also remove from localStorage
+  const win = ensureWindow();
+  if (win) {
+    try {
+      win.localStorage.removeItem(OPTIMIZED_ITINERARY_KEY);
+      console.log('Cleared optimized itinerary from localStorage');
+    } catch (err) {
+      console.warn('Unable to clear optimized itinerary from localStorage', err);
+    }
+  }
+  
+  return updatedState;
+};
+
+export { TRIP_STATE_KEY, OPTIMIZED_ITINERARY_KEY };
 

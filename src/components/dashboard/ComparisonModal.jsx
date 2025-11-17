@@ -107,10 +107,14 @@ const prepareBarChartData = (selectedFlight, alternativeFlights) => {
   // Transform to recharts format: each metric is a data point
   // Show actual values (not normalized) for better readability
   const metrics = [
-    { key: 'actualPrice', label: 'Cost', format: (val) => `${currencySymbol}${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-    { key: 'actualDurationHours', label: 'Duration (hours)', format: (val) => `${val.toFixed(1)}h` },
+    { key: 'actualPrice', label: 'Cost (USD)', format: (val) => `${currencySymbol}${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
+    { key: 'actualDurationHours', label: 'Duration (hours)', format: (val) => {
+      const hours = Math.floor(val);
+      const minutes = Math.round((val - hours) * 60);
+      return hours > 0 && minutes > 0 ? `${hours}h ${minutes}m` : hours > 0 ? `${hours}h` : `${minutes}m`;
+    }},
     { key: 'actualStops', label: 'Stops', format: (val) => val === 0 ? 'Non-stop' : `${val} stop${val > 1 ? 's' : ''}` },
-    { key: 'actualConvenience', label: 'Convenience', format: (val) => `${Math.round(val * 100)}%` }
+    { key: 'actualConvenience', label: 'Convenience score', format: (val) => `${Math.round(val * 100)}%` }
   ];
   
   const barData = metrics.map(metric => {
@@ -127,7 +131,35 @@ const prepareBarChartData = (selectedFlight, alternativeFlights) => {
   return { barData, flightData };
 };
 
-// Calculate summary insights for exactly 2 flights
+// Helper to get short airline name (e.g., "KLM" from "KLM Royal Dutch Airlines")
+const getShortAirlineName = (fullName) => {
+  if (!fullName) return 'Unknown';
+  // Extract first word or common airline abbreviations
+  const firstWord = fullName.split(' ')[0];
+  // Common airline name mappings
+  const airlineMap = {
+    'KLM': 'KLM',
+    'United': 'United',
+    'American': 'American',
+    'Delta': 'Delta',
+    'Lufthansa': 'Lufthansa',
+    'British': 'British Airways',
+    'Air': 'Air France',
+    'Turkish': 'Turkish Airlines',
+    'Emirates': 'Emirates',
+    'Qatar': 'Qatar Airways'
+  };
+  return airlineMap[firstWord] || firstWord;
+};
+
+// Helper to format short flight label (e.g., "KLM KL652")
+const getShortFlightLabel = (flight) => {
+  const airline = getShortAirlineName(flight.airline);
+  const flightNumber = flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || '';
+  return `${airline} ${flightNumber}`.trim();
+};
+
+// Calculate summary insights for exactly 2 flights (short, scannable format)
 const calculateSummary = (flightData) => {
   const insights = [];
   
@@ -137,54 +169,98 @@ const calculateSummary = (flightData) => {
   
   const [flight1, flight2] = flightData;
   
-  // Helper function to format price with currency
-  const formatPrice = (price, currency) => {
+  // Helper function to format price with currency (rounded)
+  const formatPrice = (price, currency, round = true) => {
     const symbol = currency === 'EUR' ? '€' : currency === 'USD' ? '$' : currency || '€';
+    if (round) {
+      return `${symbol}${Math.round(price).toLocaleString('en-US')}`;
+    }
     return `${symbol}${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
+  
+  const label1 = getShortFlightLabel(flight1);
+  const label2 = getShortFlightLabel(flight2);
   
   // Find cheaper flight
   const cheaper = flight1.actualPrice < flight2.actualPrice ? flight1 : flight2;
   const moreExpensive = flight1.actualPrice < flight2.actualPrice ? flight2 : flight1;
   const priceDifference = Math.abs(flight1.actualPrice - flight2.actualPrice);
+  const cheaperLabel = flight1.actualPrice < flight2.actualPrice ? label1 : label2;
+  const moreExpensiveLabel = flight1.actualPrice < flight2.actualPrice ? label2 : label1;
+  
   insights.push({
-    type: 'cheapest',
+    type: 'price',
     icon: '💰',
-    text: `${cheaper.fullName} is cheaper by ${formatPrice(priceDifference, cheaper.currency)} (${formatPrice(cheaper.actualPrice, cheaper.currency)} vs ${formatPrice(moreExpensive.actualPrice, moreExpensive.currency)}).`
+    label: 'Price',
+    text: `${cheaperLabel} is ${formatPrice(priceDifference, cheaper.currency)} cheaper (${formatPrice(cheaper.actualPrice, cheaper.currency)} vs ${formatPrice(moreExpensive.actualPrice, moreExpensive.currency)}).`
   });
   
   // Find faster flight
   const faster = flight1.actualDurationHours < flight2.actualDurationHours ? flight1 : flight2;
   const slower = flight1.actualDurationHours < flight2.actualDurationHours ? flight2 : flight1;
   const timeDifference = Math.abs(flight1.actualDurationHours - flight2.actualDurationHours);
+  const fasterLabel = flight1.actualDurationHours < flight2.actualDurationHours ? label1 : label2;
+  const slowerLabel = flight1.actualDurationHours < flight2.actualDurationHours ? label2 : label1;
+  
+  // Format duration difference nicely
+  const hours = Math.floor(timeDifference);
+  const minutes = Math.round((timeDifference - hours) * 60);
+  let durationDiff = '';
+  if (hours > 0 && minutes > 0) {
+    durationDiff = `${hours}h ${minutes}m`;
+  } else if (hours > 0) {
+    durationDiff = `${hours}h`;
+  } else {
+    durationDiff = `${minutes}m`;
+  }
+  
   insights.push({
-    type: 'fastest',
+    type: 'duration',
     icon: '⚡',
-    text: `${faster.fullName} is faster by ${timeDifference.toFixed(1)} hours (${faster.actualDuration} vs ${slower.actualDuration}).`
+    label: 'Duration',
+    text: `${fasterLabel} is ${durationDiff} faster (${faster.actualDuration} vs ${slower.actualDuration}).`
   });
   
   // Find best overall value (balance of cost and convenience)
-  // Calculate value score: lower price and higher convenience = better
   const calculateValueScore = (flight) => {
-    // Normalize: lower price = higher score, higher convenience = higher score
     const maxPrice = Math.max(flight1.actualPrice, flight2.actualPrice);
-    const priceScore = 1 - (flight.actualPrice / maxPrice); // 0-1, higher is better
-    const convenienceScore = flight.actualConvenience; // 0-1, higher is better
-    return (priceScore * 0.6) + (convenienceScore * 0.4); // Weight price more
+    const priceScore = 1 - (flight.actualPrice / maxPrice);
+    const convenienceScore = flight.actualConvenience;
+    return (priceScore * 0.6) + (convenienceScore * 0.4);
   };
   
   const score1 = calculateValueScore(flight1);
   const score2 = calculateValueScore(flight2);
   const bestValue = score1 > score2 ? flight1 : flight2;
-  const otherFlight = score1 > score2 ? flight2 : flight1;
+  const bestLabel = score1 > score2 ? label1 : label2;
+  
+  // Determine why it's better
+  const isCheaper = bestValue.actualPrice < (score1 > score2 ? flight2.actualPrice : flight1.actualPrice);
+  const isFaster = bestValue.actualDurationHours < (score1 > score2 ? flight2.actualDurationHours : flight1.actualDurationHours);
+  const sameStops = bestValue.actualStops === (score1 > score2 ? flight2.actualStops : flight1.actualStops);
+  
+  let reason = '';
+  if (isCheaper && isFaster) {
+    reason = 'Lower cost and much shorter travel time';
+  } else if (isCheaper) {
+    reason = 'Lower cost';
+  } else if (isFaster) {
+    reason = 'Much shorter travel time';
+  } else {
+    reason = 'Better overall value';
+  }
+  if (sameStops && (isCheaper || isFaster)) {
+    reason += ' with the same number of stops';
+  }
   
   insights.push({
-    type: 'best',
+    type: 'overall',
     icon: '✅',
-    text: `${bestValue.fullName} offers the best overall value — balances cost (${formatPrice(bestValue.actualPrice, bestValue.currency)}) and convenience better than ${otherFlight.fullName}.`
+    label: 'Overall',
+    text: `${bestLabel} offers better value for most travelers.`
   });
   
-  return insights;
+  return { insights, recommendedFlight: bestValue, recommendedLabel: bestLabel, reason };
 };
 
 // Custom tooltip for bar chart
@@ -235,9 +311,9 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
     // Can compare even with just the selected flight (no alternatives needed)
     const altFlights = alternativeFlights.length > 0 ? alternativeFlights : [];
     const result = prepareBarChartData(selectedFlight, altFlights);
-    const summaryInsights = calculateSummary(result.flightData);
+    const summaryResult = calculateSummary(result.flightData);
     console.log('ComparisonModal - prepared data:', result);
-    return { ...result, summary: summaryInsights };
+    return { ...result, summary: summaryResult };
   }, [selectedFlight, alternativeFlights]);
   
   console.log('ComparisonModal render - barData:', barData, 'flightData:', flightData);
@@ -304,6 +380,39 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
   // Use consistent colors for exactly 2 flights
   const colors = ['#00ADEF', '#FF6B6B'];
   
+  // Get short labels for flights
+  const getFlightLabels = () => {
+    if (flightData.length === 2) {
+      return {
+        label1: getShortFlightLabel(flightData[0]),
+        label2: getShortFlightLabel(flightData[1])
+      };
+    }
+    return { label1: getShortFlightLabel(flightData[0]), label2: '' };
+  };
+  
+  const flightLabels = getFlightLabels();
+  const title = flightData.length === 2 
+    ? `${flightLabels.label1} vs ${flightLabels.label2} – Flight Comparison`
+    : 'Compare 2 Flights';
+  
+  // Extract route info from flights (if available)
+  const getRouteInfo = () => {
+    // Try to get from original flight objects
+    const flight1 = flightData[0]?.originalFlight;
+    const origin = flight1?.origin || flight1?.departureCode || '';
+    const destination = flight1?.destination || flight1?.arrivalCode || '';
+    const date = flight1?.departureDate || flight1?.date || '';
+    
+    return { origin, destination, date };
+  };
+  
+  const routeInfo = getRouteInfo();
+  const routeDisplay = routeInfo.origin && routeInfo.destination 
+    ? `${routeInfo.origin} → ${routeInfo.destination}`
+    : '';
+  const dateDisplay = routeInfo.date ? ` · ${routeInfo.date}` : '';
+  
   return (
     <div
       style={{
@@ -358,23 +467,103 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           ×
         </button>
         
+        {/* Title */}
         <h2 style={{ 
           marginTop: 0, 
           marginBottom: '8px',
           fontSize: '24px',
-          fontWeight: '600',
+          fontWeight: '700',
           color: '#004C8C'
         }}>
-          Flight Comparison
+          {title}
         </h2>
-        <p style={{ 
-          marginTop: 0, 
-          marginBottom: '24px',
-          color: '#666',
-          fontSize: '14px'
-        }}>
-          Comparing {flightData.length} flight{flightData.length !== 1 ? 's' : ''} side by side
-        </p>
+        
+        {/* Summary header line */}
+        {(routeDisplay || dateDisplay) && (
+          <p style={{ 
+            marginTop: 0, 
+            marginBottom: '16px',
+            color: '#64748b',
+            fontSize: '14px',
+            fontWeight: '500'
+          }}>
+            {routeDisplay}{dateDisplay}
+          </p>
+        )}
+        
+        {/* Recommendation Banner */}
+        {summary && summary.recommendedFlight && flightData.length === 2 && (
+          <div style={{
+            marginBottom: '24px',
+            padding: '16px 20px',
+            backgroundColor: '#f0fdf4',
+            borderRadius: '8px',
+            border: '1px solid #86efac',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px'
+          }}>
+            <span style={{ fontSize: '20px', lineHeight: '1.2' }}>✅</span>
+            <div style={{ flex: 1 }}>
+              <div style={{
+                fontSize: '16px',
+                fontWeight: '600',
+                color: '#166534',
+                marginBottom: '4px'
+              }}>
+                Recommended: {summary.recommendedLabel}
+              </div>
+              <div style={{
+                fontSize: '14px',
+                color: '#15803d',
+                lineHeight: '1.4'
+              }}>
+                {summary.reason}.
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Quick Insights Section */}
+        {summary && summary.insights && summary.insights.length > 0 && (
+          <div style={{
+            marginBottom: '32px',
+            padding: '20px',
+            backgroundColor: '#f8fafc',
+            borderRadius: '8px',
+            border: '1px solid #e2e8f0'
+          }}>
+            <h3 style={{
+              marginTop: 0,
+              marginBottom: '16px',
+              fontSize: '18px',
+              fontWeight: '600',
+              color: '#004C8C'
+            }}>
+              Quick Insights
+            </h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {summary.insights.map((insight, index) => (
+                <div key={index} style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '10px',
+                  padding: '10px',
+                  backgroundColor: 'white',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  lineHeight: '1.5'
+                }}>
+                  <span style={{ fontSize: '18px', lineHeight: '1.2', flexShrink: 0 }}>{insight.icon}</span>
+                  <div>
+                    <strong style={{ color: '#1e293b', marginRight: '6px' }}>{insight.label}</strong>
+                    <span style={{ color: '#475569' }}>– {insight.text}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         
         {/* Bar Chart */}
         <div style={{ marginBottom: '32px', marginLeft: 'auto', marginRight: 'auto', maxWidth: '800px' }}>
@@ -393,7 +582,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                 type="category" 
                 dataKey="metric" 
                 tick={{ fill: '#64748b', fontSize: 12 }}
-                width={130}
+                width={140}
               />
               <Tooltip content={<CustomTooltip />} />
               <Legend 
@@ -440,9 +629,9 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                     borderRadius: '2px'
                   }}></div>
                   <div>
-                    <div style={{ fontWeight: '600' }}>{flight.fullName}</div>
+                    <div style={{ fontWeight: '600' }}>{getShortFlightLabel(flight)}</div>
                     <div style={{ marginTop: '2px', fontSize: '11px', color: '#64748b' }}>
-                      {priceSymbol}{flight.actualPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} • {flight.actualDuration} • {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
+                      {priceSymbol}{Math.round(flight.actualPrice).toLocaleString('en-US')} • {flight.actualDuration} • {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
                     </div>
                   </div>
                 </div>
@@ -450,42 +639,6 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
             })}
           </div>
         </div>
-        
-        {/* Quick Insights Section */}
-        {summary && summary.length > 0 && (
-          <div style={{
-            marginBottom: '32px',
-            padding: '20px',
-            backgroundColor: '#f0f9ff',
-            borderRadius: '8px',
-            border: '1px solid #00ADEF'
-          }}>
-            <h3 style={{
-              marginTop: 0,
-              marginBottom: '16px',
-              fontSize: '18px',
-              fontWeight: '600',
-              color: '#004C8C'
-            }}>
-              Quick Insights
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {summary.map((insight, index) => (
-                <div key={index} style={{
-                  padding: '12px',
-                  backgroundColor: 'white',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  color: '#1e40af',
-                  border: '1px solid #bae6fd'
-                }}>
-                  <span style={{ fontSize: '18px', marginRight: '10px' }}>{insight.icon}</span>
-                  {insight.text}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
         
         {/* Detailed Comparison Table */}
         <div style={{ marginTop: '32px' }}>
@@ -529,9 +682,21 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                       minWidth: '150px',
                       width: `${75 / flightData.length}%`
                     }}>
-                      {flight.fullName}
+                      {getShortFlightLabel(flight)}
                     </th>
                   ))}
+                  {flightData.length === 2 && (
+                    <th style={{ 
+                      padding: '12px', 
+                      textAlign: 'center',
+                      fontWeight: '600',
+                      color: '#004C8C',
+                      minWidth: '100px',
+                      width: '15%'
+                    }}>
+                      Better Option
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -539,43 +704,85 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                   <td style={{ padding: '12px', fontWeight: '500' }}>Price</td>
                   {flightData.map((flight, idx) => {
                     const priceSymbol = flight.currency === 'EUR' ? '€' : flight.currency === 'USD' ? '$' : flight.currency || '€';
+                    const isBetter = flightData.length === 2 && idx === (flightData[0].actualPrice < flightData[1].actualPrice ? 0 : 1);
                     return (
-                      <td key={flight.id} style={{ padding: '12px', textAlign: 'center' }}>
-                        {priceSymbol}{flight.actualPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </td>
+                      <React.Fragment key={flight.id}>
+                        <td style={{ padding: '12px', textAlign: 'center' }}>
+                          <span style={{ fontWeight: '700', color: '#059669' }}>
+                            {priceSymbol}{Math.round(flight.actualPrice).toLocaleString('en-US')}
+                          </span>
+                        </td>
+                        {flightData.length === 2 && (
+                          <td style={{ padding: '12px', textAlign: 'center' }}>
+                            {isBetter ? '✅' : '–'}
+                          </td>
+                        )}
+                      </React.Fragment>
                     );
                   })}
                 </tr>
                 <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#f8fafc' }}>
                   <td style={{ padding: '12px', fontWeight: '500' }}>Duration</td>
-                  {flightData.map((flight, idx) => (
-                    <td key={flight.id} style={{ padding: '12px', textAlign: 'center' }}>
-                      {flight.actualDuration}
-                    </td>
-                  ))}
+                  {flightData.map((flight, idx) => {
+                    const isBetter = flightData.length === 2 && idx === (flightData[0].actualDurationHours < flightData[1].actualDurationHours ? 0 : 1);
+                    return (
+                      <React.Fragment key={flight.id}>
+                        <td style={{ padding: '12px', textAlign: 'center' }}>
+                          <span style={{ fontWeight: '700', color: '#1e293b' }}>
+                            {flight.actualDuration}
+                          </span>
+                        </td>
+                        {flightData.length === 2 && (
+                          <td style={{ padding: '12px', textAlign: 'center' }}>
+                            {isBetter ? '✅' : '–'}
+                          </td>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tr>
                 <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
                   <td style={{ padding: '12px', fontWeight: '500' }}>Stops</td>
-                  {flightData.map((flight, idx) => (
-                    <td key={flight.id} style={{ padding: '12px', textAlign: 'center' }}>
-                      {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
-                    </td>
-                  ))}
+                  {flightData.map((flight, idx) => {
+                    const isBetter = flightData.length === 2 && idx === (flightData[0].actualStops < flightData[1].actualStops ? 0 : 1);
+                    return (
+                      <React.Fragment key={flight.id}>
+                        <td style={{ padding: '12px', textAlign: 'center' }}>
+                          {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
+                        </td>
+                        {flightData.length === 2 && (
+                          <td style={{ padding: '12px', textAlign: 'center' }}>
+                            {isBetter ? '✅' : '–'}
+                          </td>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tr>
                 <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#f8fafc' }}>
                   <td style={{ padding: '12px', fontWeight: '500' }}>Airline</td>
                   {flightData.map((flight, idx) => (
-                    <td key={flight.id} style={{ padding: '12px', textAlign: 'center' }}>
-                      {flight.airline}
-                    </td>
+                    <React.Fragment key={flight.id}>
+                      <td style={{ padding: '12px', textAlign: 'center' }}>
+                        {getShortAirlineName(flight.airline)}
+                      </td>
+                      {flightData.length === 2 && (
+                        <td style={{ padding: '12px', textAlign: 'center' }}>–</td>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tr>
                 <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
                   <td style={{ padding: '12px', fontWeight: '500' }}>Flight Number</td>
                   {flightData.map((flight) => (
-                    <td key={flight.id} style={{ padding: '12px', textAlign: 'center', fontFamily: 'monospace', fontSize: '13px' }}>
-                      {flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || 'N/A'}
-                    </td>
+                    <React.Fragment key={flight.id}>
+                      <td style={{ padding: '12px', textAlign: 'center', fontFamily: 'monospace', fontSize: '13px' }}>
+                        {flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || 'N/A'}
+                      </td>
+                      {flightData.length === 2 && (
+                        <td style={{ padding: '12px', textAlign: 'center' }}>–</td>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tr>
               </tbody>

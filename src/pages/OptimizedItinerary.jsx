@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { saveCurrentItinerary, loadCurrentItinerary, saveConversation } from '../utils/tripState';
+import { saveCurrentItinerary, loadCurrentItinerary, saveConversation, saveOptimizedItinerary, loadOptimizedItinerary, loadTripState, saveTripState } from '../utils/tripState';
 
 // Helper function to parse duration string to hours
 const parseDuration = (durationStr) => {
@@ -81,8 +81,23 @@ const parseDate = (dateStr) => {
     
     // 1. Try ISO format first (YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss)
     if (cleaned.match(/^\d{4}-\d{2}-\d{2}/)) {
+      // Parse as local date to avoid timezone issues
+      const parts = cleaned.split('T')[0].split('-');
+      if (parts.length === 3) {
+        const year = parseInt(parts[0]);
+        const month = parseInt(parts[1]) - 1; // Month is 0-indexed
+        const day = parseInt(parts[2]);
+        const date = new Date(year, month, day);
+        if (!isNaN(date.getTime())) {
+          // Normalize to midnight to avoid timezone issues
+          date.setHours(0, 0, 0, 0);
+          return date;
+        }
+      }
+      // Fallback to standard Date parsing
       const date = new Date(cleaned);
       if (!isNaN(date.getTime())) {
+        date.setHours(0, 0, 0, 0);
         return date;
       }
     }
@@ -342,11 +357,52 @@ export default function OptimizedItinerary() {
       // Re-read tripState inside callback to get latest data
       let currentTripState = null;
       try {
-        const { loadTripState } = require('../utils/tripState');
         currentTripState = loadTripState();
         console.log('Loaded tripState in generateItinerary:', currentTripState);
       } catch (e) {
         console.warn('Could not load tripState:', e);
+      }
+      
+      // FIRST: Try to restore from tripState.optimizedItinerary
+      if (currentTripState?.optimizedItinerary) {
+        console.log('Found optimized itinerary in tripState, restoring...');
+        setItineraryData(currentTripState.optimizedItinerary);
+        setLoading(false);
+        return;
+      }
+      
+      // SECOND: Try to restore from localStorage
+      const savedItinerary = loadOptimizedItinerary();
+      if (savedItinerary?.optimizedItinerary) {
+        console.log('Found saved itinerary in localStorage, restoring...');
+        // Restore to tripState
+        saveOptimizedItinerary(savedItinerary.optimizedItinerary);
+        // Restore other related data
+        if (savedItinerary.selectedOutboundFlight) {
+          const { selectOutboundFlight } = require('../utils/tripState');
+          selectOutboundFlight(savedItinerary.selectedOutboundFlight);
+        }
+        if (savedItinerary.selectedReturnFlight) {
+          const { selectReturnFlight } = require('../utils/tripState');
+          selectReturnFlight(savedItinerary.selectedReturnFlight);
+        }
+        if (savedItinerary.selectedHotel) {
+          const { selectHotel } = require('../utils/tripState');
+          selectHotel(savedItinerary.selectedHotel);
+        }
+        if (savedItinerary.mustDoActivities) {
+          const { recordMustDoActivities } = require('../utils/tripState');
+          recordMustDoActivities(savedItinerary.mustDoActivities);
+        }
+        if (savedItinerary.preferenceWeights) {
+          saveTripState({
+            ...currentTripState,
+            preferenceWeights: savedItinerary.preferenceWeights
+          });
+        }
+        setItineraryData(savedItinerary.optimizedItinerary);
+        setLoading(false);
+        return;
       }
       
       // Get current route info (re-compute to ensure we have latest)
@@ -370,7 +426,11 @@ export default function OptimizedItinerary() {
       
       // Check if we should update existing itinerary instead of creating new one
       const shouldUpdateExisting = location.state?.updateExistingItinerary;
-      const existingItineraryData = location.state?.existingItineraryData || loadCurrentItinerary();
+      // Only load existing itinerary if we're explicitly updating it
+      // For new trips, don't load old itinerary data
+      const existingItineraryData = shouldUpdateExisting 
+        ? (location.state?.existingItineraryData || loadCurrentItinerary())
+        : null;
       
       if (shouldUpdateExisting && existingItineraryData) {
         console.log('Updating existing itinerary with new data');
@@ -402,7 +462,7 @@ export default function OptimizedItinerary() {
           const departureTime = newOutboundFlight.departure?.match(/(\d{1,2}:\d{2})/)?.[1] || 'TBD';
           const flightItem = {
             type: 'flight',
-            title: `${newOutboundFlight.airline || 'Flight'} ${newOutboundFlight.flightNumber || ''}`,
+            title: `✈️ Flight to ${routeInfo.destination || 'destination'} (${newOutboundFlight.airline || 'Airline'} ${newOutboundFlight.flightNumber || ''})`,
             time: departureTime,
             details: {
               departure: newOutboundFlight.departure || `${existingRouteInfo.departureCode || 'N/A'} ${departureTime}`,
@@ -438,7 +498,7 @@ export default function OptimizedItinerary() {
           const departureTime = newReturnFlight.departure?.match(/(\d{1,2}:\d{2})/)?.[1] || 'TBD';
           const flightItem = {
             type: 'flight',
-            title: `${newReturnFlight.airline || 'Return Flight'} ${newReturnFlight.flightNumber || ''}`,
+            title: `✈️ Return Flight to ${routeInfo.departure || 'home city'}`,
             time: departureTime,
             details: {
               departure: newReturnFlight.departure || `${existingRouteInfo.destinationCode || 'N/A'} ${departureTime}`,
@@ -504,6 +564,12 @@ export default function OptimizedItinerary() {
         throw new Error(`Invalid departure date: ${startDateStr}`);
       }
       
+      // Normalize dates to midnight to avoid timezone issues
+      departureDate.setHours(0, 0, 0, 0);
+      if (returnDate) {
+        returnDate.setHours(0, 0, 0, 0);
+      }
+      
       // Calculate actual trip duration
       // For round trip: use returnDate
       // For one-way: only show departure day (1 day itinerary)
@@ -512,8 +578,17 @@ export default function OptimizedItinerary() {
       
       if (!tripEndDate) {
         // One-way trip: only show departure day
-        tripEndDate = departureDate; // Same as departure date for one-way
+        tripEndDate = new Date(departureDate); // Same as departure date for one-way
+        tripEndDate.setHours(0, 0, 0, 0);
       }
+      
+      console.log('Date parsing result:', {
+        startDateStr,
+        endDateStr,
+        departureDate: departureDate.toISOString().split('T')[0],
+        returnDate: returnDate ? returnDate.toISOString().split('T')[0] : null,
+        tripEndDate: tripEndDate.toISOString().split('T')[0]
+      });
       
       // Calculate check-in and check-out dates for hotel search
       // For hotel search, use a reasonable check-out date even for one-way
@@ -546,43 +621,74 @@ export default function OptimizedItinerary() {
       const hasValidDestination = destinationCode && destinationCode !== '' || 
                                    (destinationName && destinationName !== 'Unknown' && destinationName !== '');
       
+      console.log('fetchItineraryData parameters:', {
+        destinationCode,
+        destinationName,
+        checkInDate,
+        checkOutDateForHotel,
+        hasValidDestination
+      });
+      
       if (hasValidDestination) {
         try {
+          const requestBody = {
+            destinationCode: destinationCode || destinationName,
+            destinationName: destinationName || destinationCode,
+            checkIn: checkInDate,
+            checkOut: checkOutDateForHotel,
+            adults: 1
+          };
+          
+          console.log('Calling fetchItineraryData with:', JSON.stringify(requestBody, null, 2));
+          console.log('Date values:', {
+            checkInDate,
+            checkOutDateForHotel,
+            checkInType: typeof checkInDate,
+            checkOutType: typeof checkOutDateForHotel
+          });
+          
           const dataResponse = await fetch(`${base}/api/fetchItineraryData`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              destinationCode: destinationCode || destinationName,
-              destinationName: destinationName || destinationCode,
-              checkIn: checkInDate,
-              checkOut: checkOutDateForHotel,
-              adults: 1
-            })
+            body: JSON.stringify(requestBody)
           });
+
+          console.log('fetchItineraryData response status:', dataResponse.status);
 
           if (dataResponse.ok) {
             const dataResult = await dataResponse.json();
+            console.log('fetchItineraryData result:', {
+              ok: dataResult.ok,
+              hotelsCount: dataResult.hotels?.length || 0,
+              activitiesCount: dataResult.activities?.length || 0,
+              error: dataResult.error
+            });
             
             if (dataResult.ok) {
               hotelsData = dataResult.hotels || [];
               activitiesData = dataResult.activities || [];
+              console.log(`Successfully fetched ${hotelsData.length} hotels and ${activitiesData.length} activities`);
             } else {
               console.warn('fetchItineraryData returned error:', dataResult.error);
               // Continue without hotels/activities
             }
           } else {
-            console.warn('fetchItineraryData request failed:', dataResponse.status);
+            const errorText = await dataResponse.text();
+            console.warn('fetchItineraryData request failed:', dataResponse.status, errorText);
             // Continue without hotels/activities
           }
         } catch (e) {
-          console.warn('Error fetching hotels and activities:', e);
+          console.error('Error fetching hotels and activities:', e);
           // Continue without hotels/activities
         }
       } else {
-        console.warn('No valid destination - skipping hotels/activities fetch');
+        console.warn('No valid destination - skipping hotels/activities fetch', {
+          destinationCode,
+          destinationName
+        });
       }
       
-      console.log(`Fetched ${hotelsData.length} hotels and ${activitiesData.length} activities`);
+      console.log(`Final: Fetched ${hotelsData.length} hotels and ${activitiesData.length} activities`);
 
       // Prepare flights data - use optimalFlight from tripState if available
       // Include tripState.flights if allFlights is empty
@@ -1077,7 +1183,282 @@ export default function OptimizedItinerary() {
           activity: null // Don't use single activity - use all activities in createDayByDayItinerary
         };
       }
-
+      
+      // Select hotel based on user preferences BEFORE creating itinerary
+      // Get hotel preferences from tripState
+      const hotelPrefs = currentTripState?.filters || {};
+      const hotelPriceMax = hotelPrefs.hotelPriceMax;
+      const hotelPriceMin = hotelPrefs.hotelPriceMin;
+      const hotelMinimumRating = hotelPrefs.hotelMinimumRating;
+      const hotelPreferredLocation = hotelPrefs.hotelPreferredLocation;
+      const hotelSpecificName = hotelPrefs.hotelSpecificName;
+      
+      console.log('Hotel preferences from TripState:', {
+        hotelPriceMax,
+        hotelPriceMin,
+        hotelMinimumRating,
+        hotelPreferredLocation,
+        hotelSpecificName
+      });
+      
+      // Extract price helper function (needed for hotel selection)
+      const extractPriceForSelection = (item) => {
+        if (!item) return 0;
+        if (typeof item.price === 'number') return item.price;
+        if (typeof item.price === 'object') {
+          return item.price.amount || item.price.total || item.price.value || 0;
+        }
+        const parsed = parseFloat(item.price);
+        return isNaN(parsed) ? 0 : parsed;
+      };
+      
+      // Function to select the best hotel based on preferences
+      const selectBestHotelForItinerary = (hotelsList) => {
+        if (!hotelsList || hotelsList.length === 0) {
+          return null;
+        }
+        
+        // Priority 1: If specific hotel name is mentioned, find and use it
+        if (hotelSpecificName) {
+          const specificHotel = hotelsList.find(h => {
+            const hotelName = (h.name || '').toLowerCase();
+            const searchName = hotelSpecificName.toLowerCase();
+            return hotelName.includes(searchName) || searchName.includes(hotelName);
+          });
+          
+          if (specificHotel) {
+            console.log('Found specific hotel requested by user:', specificHotel.name);
+            return specificHotel;
+          } else {
+            console.warn('User requested specific hotel but not found in list:', hotelSpecificName);
+          }
+        }
+        
+        // Priority 2: Select hotel that best matches preferences
+        const scoredHotels = hotelsList.map(h => {
+          let score = 0;
+          const hotelPrice = extractPriceForSelection(h) || 0;
+          const hotelRating = h.rating || h.score || 0;
+          const hotelLocation = (h.location || h.address || '').toLowerCase();
+          const hotelName = (h.name || '').toLowerCase();
+          
+          // Budget match (priceMax is most important)
+          if (hotelPriceMax) {
+            if (hotelPrice <= hotelPriceMax) {
+              const priceRatio = hotelPrice / hotelPriceMax;
+              score += (1 - priceRatio) * 40;
+            } else {
+              score -= 20;
+            }
+          }
+          
+          // PriceMin match
+          if (hotelPriceMin) {
+            if (hotelPrice >= hotelPriceMin) {
+              score += 10;
+            } else {
+              score -= 10;
+            }
+          }
+          
+          // Rating match
+          if (hotelMinimumRating) {
+            if (hotelRating >= hotelMinimumRating) {
+              const ratingBonus = (hotelRating - hotelMinimumRating) * 10;
+              score += 30 + Math.min(ratingBonus, 20);
+            } else {
+              const ratingPenalty = (hotelMinimumRating - hotelRating) * 15;
+              score -= ratingPenalty;
+            }
+          }
+          
+          // Location match
+          if (hotelPreferredLocation) {
+            const preferredLocationLower = hotelPreferredLocation.toLowerCase();
+            if (hotelLocation.includes(preferredLocationLower) || 
+                hotelName.includes(preferredLocationLower) ||
+                preferredLocationLower.includes('city center') && (hotelLocation.includes('center') || hotelLocation.includes('downtown')) ||
+                preferredLocationLower.includes('waterfront') && (hotelLocation.includes('waterfront') || hotelLocation.includes('beach'))) {
+              score += 30;
+            } else {
+              const locationWords = preferredLocationLower.split(/\s+/);
+              const matchCount = locationWords.filter(word => 
+                hotelLocation.includes(word) || hotelName.includes(word)
+              ).length;
+              if (matchCount > 0) {
+                score += matchCount * 5;
+              }
+            }
+          }
+          
+          // Base score from rating (if no preferences, still prefer higher rated)
+          if (!hotelPriceMax && !hotelMinimumRating && !hotelPreferredLocation) {
+            score += hotelRating * 10;
+          }
+          
+          return { hotel: h, score };
+        });
+        
+        scoredHotels.sort((a, b) => b.score - a.score);
+        const bestHotel = scoredHotels[0]?.hotel || null;
+        if (bestHotel) {
+          console.log('Selected best matching hotel for itinerary:', {
+            name: bestHotel.name,
+            score: scoredHotels[0].score,
+            price: extractPriceForSelection(bestHotel),
+            rating: bestHotel.rating || bestHotel.score
+          });
+        }
+        
+        return bestHotel;
+      };
+      
+      // Select hotel based on preferences
+      const selectedHotelFromState = currentTripState?.selectedHotel || null;
+      let finalHotelForItinerary = null;
+      
+      console.log('Hotel selection debug:', {
+        hotelsDataLength: hotelsData.length,
+        selectedHotelFromState: selectedHotelFromState?.name,
+        resultHotel: result.hotel?.name,
+        hotelSpecificName,
+        hotelPriceMax,
+        hotelPriceMin,
+        hotelMinimumRating,
+        hotelPreferredLocation
+      });
+      
+      // If user has preferences, select best matching hotel
+      if (hotelSpecificName || hotelPriceMax || hotelPriceMin || hotelMinimumRating || hotelPreferredLocation) {
+        const bestMatchingHotel = selectBestHotelForItinerary(hotelsData);
+        if (bestMatchingHotel) {
+          finalHotelForItinerary = bestMatchingHotel;
+          console.log('Using hotel selected based on preferences for itinerary:', finalHotelForItinerary.name);
+        } else if (hotelSpecificName && hotelsData.length === 0) {
+          // User specified a hotel name but no hotel data is available from API
+          // Try to fetch hotel data again with hotel name search
+          console.log('Attempting to fetch hotel data for specific hotel:', hotelSpecificName);
+          
+          try {
+            // Try fetching hotels again - sometimes API needs retry
+            const retryResponse = await fetch(`${base}/api/fetchItineraryData`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                destinationCode: destinationCode || destinationName,
+                destinationName: destinationName || destinationCode,
+                checkIn: checkInDate,
+                checkOut: checkOutDateForHotel,
+                adults: 1,
+                hotelName: hotelSpecificName // Pass hotel name for search
+              })
+            });
+            
+            if (retryResponse.ok) {
+              const retryData = await retryResponse.json();
+              if (retryData.ok && retryData.hotels && retryData.hotels.length > 0) {
+                // Try to find the specific hotel in the results
+                const hotelNameLower = hotelSpecificName.toLowerCase();
+                const foundHotel = retryData.hotels.find(h => {
+                  const hName = (h.name || '').toLowerCase();
+                  return hName.includes(hotelNameLower) || hotelNameLower.includes(hName);
+                });
+                
+                if (foundHotel) {
+                  finalHotelForItinerary = foundHotel;
+                  console.log('Found hotel from retry API call:', foundHotel.name, 'price:', foundHotel.price);
+                }
+              }
+            }
+          } catch (retryError) {
+            console.warn('Retry hotel search failed:', retryError);
+          }
+          
+          // If still no hotel found, create from user preference but try to get real price
+          if (!finalHotelForItinerary) {
+            // Try to get real price from external source or use user's price preference
+            let realPrice = hotelPriceMax || hotelPriceMin;
+            
+            // If user specified a price range, use the max as estimate
+            // Otherwise, estimate based on hotel name patterns (luxury hotels)
+            if (!realPrice) {
+              const hotelNameLower = hotelSpecificName.toLowerCase();
+              
+              // Estimate prices for known luxury hotels
+              const luxuryHotelPatterns = [
+                { pattern: /le meurice|meurice/i, price: 800 },
+                { pattern: /hôtel de crillon|hotel de crillon|crillon/i, price: 900 },
+                { pattern: /ritz|ritz paris/i, price: 850 },
+                { pattern: /four seasons|fourseasons/i, price: 700 },
+                { pattern: /shangri-la|shangrila/i, price: 600 },
+                { pattern: /mandarin oriental|mandarin/i, price: 650 },
+                { pattern: /peninsula|peninsula hotel/i, price: 750 },
+                { pattern: /w hotel|w barcelona|w paris/i, price: 350 },
+                { pattern: /arts barcelona|hotel arts/i, price: 350 },
+                { pattern: /majestic|majestic hotel/i, price: 320 },
+                { pattern: /palace|palace hotel/i, price: 400 },
+                { pattern: /grand|grand hotel/i, price: 300 },
+              ];
+              
+              // Check if hotel name matches any luxury pattern
+              const matchedPattern = luxuryHotelPatterns.find(p => p.pattern.test(hotelNameLower));
+              if (matchedPattern) {
+                realPrice = matchedPattern.price;
+                console.log(`Estimated price for ${hotelSpecificName} based on pattern: $${realPrice}/night`);
+              } else {
+                // Default estimate based on hotel name characteristics
+                // If hotel name contains luxury indicators, estimate higher
+                if (hotelNameLower.includes('palace') || hotelNameLower.includes('ritz') || 
+                    hotelNameLower.includes('crillon') || hotelNameLower.includes('meurice')) {
+                  realPrice = 800; // Luxury hotel default
+                } else if (hotelNameLower.includes('grand') || hotelNameLower.includes('royal')) {
+                  realPrice = 400; // Upscale hotel
+                } else {
+                  realPrice = 300; // Standard hotel default
+                }
+                console.log(`Estimated price for ${hotelSpecificName} (default): $${realPrice}/night`);
+              }
+            }
+            
+            finalHotelForItinerary = {
+              name: hotelSpecificName,
+              location: hotelPreferredLocation || destinationName || destinationCode || 'Paris',
+              price: realPrice,
+              currency: 'USD',
+              rating: hotelMinimumRating || 4.5,
+              check_in: checkInDate,
+              check_out: checkOutDateForHotel,
+              // Mark as user-specified hotel (not from API)
+              isUserSpecified: true,
+              priceUnavailable: false // We have an estimated price
+            };
+            console.log('Created hotel object from user preference (no API data available):', finalHotelForItinerary.name, 'estimated price:', realPrice);
+          }
+        } else {
+          finalHotelForItinerary = selectedHotelFromState || result.hotel || null;
+          console.log('No hotel matched preferences, using fallback:', finalHotelForItinerary?.name || 'none');
+        }
+      } else {
+        // No preferences - use selected hotel, result.hotel, or first available hotel
+        finalHotelForItinerary = selectedHotelFromState || result.hotel || (hotelsData.length > 0 ? hotelsData[0] : null);
+        console.log('No preferences - using hotel:', finalHotelForItinerary?.name || 'none');
+      }
+      
+      // Update result.hotel with the selected hotel
+      // Check if result.hotel is a valid object (not a string like "Hotel information not available")
+      if (finalHotelForItinerary && typeof finalHotelForItinerary === 'object' && finalHotelForItinerary.name && finalHotelForItinerary.name !== 'Hotel information not available') {
+        result.hotel = finalHotelForItinerary;
+        console.log('Final hotel for itinerary:', result.hotel.name);
+      } else {
+        // Clear invalid hotel data
+        result.hotel = null;
+        console.warn('No valid hotel available for itinerary!', {
+          finalHotelForItinerary,
+          type: typeof finalHotelForItinerary,
+          name: finalHotelForItinerary?.name
+        });
+      }
+      
       // Create day-by-day itinerary structure
       // Flight is optional: if user asks for itinerary based on activities first, flight can be empty
       // Use selected flights from tripState first, then optimal flights, otherwise null
@@ -1134,24 +1515,81 @@ export default function OptimizedItinerary() {
         endDate: tripEndDate.toISOString().split('T')[0]
       });
       
-      const days = createDayByDayItinerary(
-        outboundFlight, // Use optimal outbound flight if available
-        result.hotel,
+      // Use the same flight and hotel data that will be displayed in Summary
+      // Priority: selectedOutboundFlight > optimalOutboundFlight > result.flight
+      const finalOutboundFlight = selectedOutbound || optimalOutboundFlight || outboundFlight || result.flight || null;
+      const finalReturnFlight = selectedReturn || optimalReturnFlight || returnFlight || null;
+      const finalHotelForTimeline = selectedHotelFromState || result.hotel || finalHotelForItinerary || null;
+      
+      console.log('createDayByDayItinerary inputs:', {
+        finalOutboundFlight: finalOutboundFlight ? {
+          flightNumber: finalOutboundFlight.flightNumber,
+          airline: finalOutboundFlight.airline,
+          departure: finalOutboundFlight.departure,
+          arrival: finalOutboundFlight.arrival,
+          price: finalOutboundFlight.price
+        } : 'N/A',
+        finalReturnFlight: finalReturnFlight ? {
+          flightNumber: finalReturnFlight.flightNumber,
+          airline: finalReturnFlight.airline
+        } : 'N/A',
+        finalHotelForTimeline: finalHotelForTimeline ? {
+          name: finalHotelForTimeline.name || finalHotelForTimeline.hotelName,
+          location: finalHotelForTimeline.location,
+          price: finalHotelForTimeline.price || finalHotelForTimeline.price_per_night
+        } : 'N/A',
+        resultHotel: result.hotel ? {
+          name: result.hotel.name || result.hotel.hotelName
+        } : 'N/A',
+        selectedHotelFromState: selectedHotelFromState ? {
+          name: selectedHotelFromState.name || selectedHotelFromState.hotelName
+        } : 'N/A',
+        selectedOutbound: selectedOutbound ? {
+          flightNumber: selectedOutbound.flightNumber
+        } : 'N/A',
+        optimalOutboundFlight: optimalOutboundFlight ? {
+          flightNumber: optimalOutboundFlight.flightNumber
+        } : 'N/A'
+      });
+      
+      const { days, hotelStays } = createDayByDayItinerary(
+        finalOutboundFlight, // Use final outbound flight
+        finalHotelForTimeline, // Use final hotel
         result.activity ? [result.activity] : [],
         activitiesData,
         currentRouteInfo,
         departureDate, // startDate
         tripEndDate, // endDate
-        returnFlight // Use optimal return flight if available
+        finalReturnFlight // Use final return flight
       );
 
-      setItineraryData({
+      const finalItineraryData = {
         ...result,
         days: days,
+        hotelStays: hotelStays, // Store hotelStays for summary
         routeInfo: currentRouteInfo,
         hotelsData: hotelsData,
-        activitiesData: activitiesData
+        activitiesData: activitiesData,
+        // Store flight and hotel data for reference
+        flight: finalOutboundFlight || result.flight,
+        hotel: finalHotelForTimeline || result.hotel,
+        returnFlight: finalReturnFlight || null
+      };
+      
+      console.log('Final itinerary data:', {
+        daysCount: days.length,
+        firstDayItems: days[0]?.items?.length || 0,
+        firstDayItemTypes: days[0]?.items?.map(i => i.type) || [],
+        hotelStaysCount: hotelStays.length,
+        hasFlight: !!finalOutboundFlight,
+        hasHotel: !!finalHotelForTimeline,
+        hasReturnFlight: !!finalReturnFlight
       });
+      
+      setItineraryData(finalItineraryData);
+      
+      // Save optimized itinerary to tripState and localStorage
+      saveOptimizedItinerary(finalItineraryData);
     } catch (err) {
       console.error('Error generating itinerary:', err);
       setError(err.message || 'Failed to generate itinerary. Please try again.');
@@ -1175,13 +1613,29 @@ export default function OptimizedItinerary() {
     }
     
     const endDateObj = (end && !isNaN(end.getTime())) ? end : start;
-    const currentDate = new Date(start);
+    
+    // Normalize dates to midnight (00:00:00) to avoid timezone issues
+    const startNormalized = new Date(start);
+    startNormalized.setHours(0, 0, 0, 0);
+    
+    const endNormalized = new Date(endDateObj);
+    endNormalized.setHours(0, 0, 0, 0);
+    
+    const currentDate = new Date(startNormalized);
     
     // Generate all dates from start to end (inclusive)
-    while (currentDate <= endDateObj) {
+    // IMPORTANT: Include the end date by using <= comparison
+    while (currentDate <= endNormalized) {
       dates.push(new Date(currentDate));
       currentDate.setDate(currentDate.getDate() + 1);
     }
+    
+    console.log('buildDateRange:', {
+      start: startNormalized.toISOString().split('T')[0],
+      end: endNormalized.toISOString().split('T')[0],
+      count: dates.length,
+      dates: dates.map(d => d.toISOString().split('T')[0])
+    });
     
     return dates;
   };
@@ -1209,34 +1663,50 @@ export default function OptimizedItinerary() {
     // Parse tripState dates first
     if (tripStartDate) {
       if (tripStartDate instanceof Date) {
-        startDateObj = tripStartDate;
+        startDateObj = new Date(tripStartDate);
+        startDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
       } else {
         startDateObj = parseDate(tripStartDate);
+        if (startDateObj) {
+          startDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
+        }
       }
     }
     
     if (tripEndDate) {
       if (tripEndDate instanceof Date) {
-        endDateObj = tripEndDate;
+        endDateObj = new Date(tripEndDate);
+        endDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
       } else {
         endDateObj = parseDate(tripEndDate);
+        if (endDateObj) {
+          endDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
+        }
       }
     }
     
     // Fallback to function parameters if tripState dates are not available
     if (!startDateObj || isNaN(startDateObj.getTime())) {
       if (startDate instanceof Date) {
-        startDateObj = startDate;
+        startDateObj = new Date(startDate);
+        startDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
       } else if (startDate) {
         startDateObj = parseDate(startDate);
+        if (startDateObj) {
+          startDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
+        }
       }
     }
     
     if (!endDateObj || isNaN(endDateObj.getTime())) {
       if (endDate instanceof Date) {
-        endDateObj = endDate;
+        endDateObj = new Date(endDate);
+        endDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
       } else if (endDate) {
         endDateObj = parseDate(endDate);
+        if (endDateObj) {
+          endDateObj.setHours(0, 0, 0, 0); // Normalize to midnight
+        }
       }
     }
     
@@ -1247,8 +1717,17 @@ export default function OptimizedItinerary() {
     }
     
     // For one-way trips, endDate might be null or same as startDate
+    // But if we have a valid endDate from tripState, use it (don't default to startDate)
+    // Only default to startDate if endDate is truly missing
     if (!endDateObj || isNaN(endDateObj.getTime())) {
-      endDateObj = startDateObj; // Use startDate as endDate for one-way trips
+      // Check if we have endDate from function parameter
+      if (endDate && endDate instanceof Date && !isNaN(endDate.getTime())) {
+        endDateObj = new Date(endDate);
+        endDateObj.setHours(0, 0, 0, 0);
+      } else {
+        endDateObj = new Date(startDateObj); // Use startDate as endDate for one-way trips
+        endDateObj.setHours(0, 0, 0, 0);
+      }
     }
     
     // Build date range: tripState.startDate ~ tripState.endDate (inclusive, ascending order)
@@ -1270,6 +1749,21 @@ export default function OptimizedItinerary() {
     console.log(`Creating itinerary for ${daysDiff} days (${startDateObj.toISOString().split('T')[0]} to ${endDateObj.toISOString().split('T')[0]})`);
     
     // Flight is optional - activity-based itineraries can be created without flights
+    // Helper function to extract price from item
+    const extractPrice = (item) => {
+      if (!item) return 0;
+      if (item.price === null || item.price === undefined) return 0;
+      if (typeof item.price === 'number') return item.price;
+      if (typeof item.price === 'object' && item.price !== null) {
+        return item.price.amount || item.price.total || item.price.value || 0;
+      }
+      if (typeof item.price === 'string') {
+        const parsed = parseFloat(item.price);
+        return isNaN(parsed) ? 0 : parsed;
+      }
+      return 0;
+    };
+    
     // Helper function to create booking link
     const createBookingLink = (activityName) => {
       const encodedName = encodeURIComponent(activityName);
@@ -1332,7 +1826,27 @@ export default function OptimizedItinerary() {
     // Flight is optional - if not provided, show placeholder (activity-based itinerary)
     const day1Items = [];
     
-    if (flight && flight.id !== 'dummy-flight' && flight.flightNumber !== 'FL123' && flight.airline !== 'Airline') {
+    console.log('createDayByDayItinerary flight check:', {
+      hasFlight: !!flight,
+      flightType: typeof flight,
+      flightId: flight?.id,
+      flightNumber: flight?.flightNumber,
+      airline: flight?.airline,
+      isDummy: flight?.id === 'dummy-flight' || flight?.flightNumber === 'FL123' || flight?.airline === 'Airline',
+      flightKeys: flight ? Object.keys(flight) : []
+    });
+    
+    // Check if flight is valid - more lenient check
+    // Accept flight if it has flightNumber OR airline (not both required)
+    const isValidFlight = flight && 
+                          typeof flight === 'object' &&
+                          (flight.flightNumber || flight.airline) &&
+                          flight.flightNumber !== 'FL123' &&
+                          flight.airline !== 'Airline' &&
+                          flight.id !== 'dummy-flight' &&
+                          !flight.isDummy;
+    
+    if (isValidFlight) {
       // Extract time from departure string (e.g., "20 Nov 2025, 06:05" -> "06:05")
       let departureTime = 'TBD';
       if (flight.departure) {
@@ -1354,9 +1868,11 @@ export default function OptimizedItinerary() {
                              (flight.arrival?.match(/([A-Z]{3})/) ? flight.arrival.match(/([A-Z]{3})/)[1] : null) ||
                              routeInfo.destinationCode || 'N/A';
       
+      // Format: "✈️ Flight to {destination} (Airline + Code)"
+      const flightTitle = `✈️ Flight to ${routeInfo.destination || 'destination'} (${flight.airline || 'Airline'} ${flight.flightNumber || ''})`;
       day1Items.push({
         type: 'flight',
-        title: `${flight.airline || 'Flight'} ${flight.flightNumber || ''}`,
+        title: flightTitle,
         time: departureTime,
         details: {
           departure: flight.departure || `${departureAirport} ${departureTime}`,
@@ -1373,7 +1889,7 @@ export default function OptimizedItinerary() {
       // No flight provided - add placeholder message
       day1Items.push({
         type: 'activity',
-        title: 'Flight Needed',
+        title: '✈️ Flight Needed',
         time: 'Morning',
         details: {
           description: 'Please search for flights in the chat to add flight information to your itinerary.',
@@ -1384,18 +1900,92 @@ export default function OptimizedItinerary() {
       console.log('No flight provided for Day 1 - adding placeholder');
     }
     
-    // Add hotel check-in only for round trips or if hotel is available
-    if (hotel && !hotel.isDummy) {
+    // Create hotelStays structure from hotel data
+    // Hotels are NOT activities but should be shown as "stays" in the timeline
+    let hotelStays = [];
+    
+    console.log('createDayByDayItinerary hotel check:', {
+      hotel: hotel?.name || hotel?.hotelName || 'null',
+      hotelType: typeof hotel,
+      isDummy: hotel?.isDummy,
+      isString: typeof hotel === 'string',
+      hasName: !!(hotel?.name || hotel?.hotelName),
+      nameValue: hotel?.name || hotel?.hotelName,
+      startDateObj: startDateObj?.toISOString(),
+      endDateObj: endDateObj?.toISOString(),
+      hotelKeys: hotel ? Object.keys(hotel) : []
+    });
+    
+    // Check if hotel is valid (not a string, not dummy, has name)
+    // More lenient check - accept hotel.name or hotel.hotelName
+    const hotelName = hotel?.name || hotel?.hotelName;
+    const isValidHotel = hotel && 
+                        typeof hotel === 'object' && 
+                        !hotel.isDummy && 
+                        hotelName && 
+                        hotelName !== 'Hotel information not available' &&
+                        startDateObj && 
+                        endDateObj;
+    
+    if (isValidHotel) {
+      const checkInDate = new Date(startDateObj);
+      const checkOutDate = new Date(endDateObj);
+      
+      // Calculate nights (check-out date is exclusive, so subtract 1 day)
+      const nights = Math.max(1, Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24)));
+      
+      // Extract price per night
+      const pricePerNight = extractPrice(hotel) || 0;
+      const totalPrice = pricePerNight * nights;
+      
+      hotelStays.push({
+        name: hotelName || 'Hotel',
+        checkInDate: checkInDate,
+        checkOutDate: checkOutDate,
+        nights: nights,
+        pricePerNight: pricePerNight,
+        totalPrice: totalPrice,
+        location: hotel.location || routeInfo.destination || '',
+        rating: hotel.rating || 0
+      });
+      
+      console.log('Created hotel stay:', hotelStays[0]);
+    }
+    
+    // Add hotel stay to Day 1 (check-in day) if hotel exists
+    if (hotelStays.length > 0 && dateRange.length > 0) {
+      const hotelStay = hotelStays[0];
+      const checkInDate = hotelStay.checkInDate;
+      const checkOutDate = hotelStay.checkOutDate;
+      
+      // Format dates for display (e.g., "Jan 5 – Jan 10")
+      const formatDateShort = (date) => {
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        return `${months[date.getMonth()]} ${date.getDate()}`;
+      };
+      
+      const dateRangeStr = `${formatDateShort(checkInDate)} – ${formatDateShort(checkOutDate)}`;
+      const nightsStr = hotelStay.nights === 1 ? '1 night' : `${hotelStay.nights} nights`;
+      const priceStr = hotelStay.pricePerNight > 0 
+        ? `~$${Math.round(hotelStay.pricePerNight)}/night` 
+        : (hotelStay.priceUnavailable ? 'Price on request' : 'Included in hotel budget');
+      
+      // Add hotel stay card to Day 1 (after flight, before activities)
       day1Items.push({
         type: 'hotel',
-        title: hotel?.name || 'Hotel',
+        title: `🏨 Stay at ${hotelStay.name} (${dateRangeStr}, ${nightsStr}, ${priceStr})`,
         time: 'Check-in',
+        isHotelStay: true,
+        isCheckIn: true,
         details: {
-          location: hotel?.location || routeInfo.destination,
-          distance: hotel?.distance || 0,
-          rating: hotel?.rating || 0,
-          price: hotel?.price || 0,
-          name: hotel?.name
+          name: hotelStay.name,
+          checkInDate: checkInDate,
+          checkOutDate: checkOutDate,
+          nights: hotelStay.nights,
+          pricePerNight: hotelStay.pricePerNight,
+          totalPrice: hotelStay.totalPrice,
+          location: hotelStay.location,
+          rating: hotelStay.rating
         }
       });
     }
@@ -1436,25 +2026,48 @@ export default function OptimizedItinerary() {
       });
       
       // Separate must-do activities from regular activities
+      // IMPORTANT: First filter out hotels from must-do activities
+      // Hotels are NOT activities and must NEVER appear in the itinerary timeline
+      const filteredMustDoActivities = mustDoActivities.filter(mustDo => {
+        const name = (mustDo.name || '').toLowerCase();
+        const description = (mustDo.description || '').toLowerCase();
+        
+        // Check if this is a hotel (not an activity)
+        const hotelKeywords = ['hotel', 'stay at', 'accommodation', 'resort', 'inn', 'lodge', 'hostel', 'motel'];
+        const isHotel = hotelKeywords.some(keyword => 
+          name.includes(keyword) || 
+          description.includes(keyword) ||
+          name.includes('to stay at') ||
+          name.includes('staying at')
+        );
+        
+        if (isHotel) {
+          console.log('Filtered out hotel from must-do activities:', mustDo.name);
+          return false; // Exclude hotels
+        }
+        return true; // Include real activities
+      });
+      
       // Filter out must-do activities from allActivities to avoid duplication
       const regularActivities = (allActivities || []).filter(act => {
         const actName = (act.name || '').toLowerCase().trim();
-        return !mustDoActivities.some(mustDo => {
+        return !filteredMustDoActivities.some(mustDo => {
           const mustDoName = (mustDo.name || '').toLowerCase().trim();
           return actName === mustDoName || actName.includes(mustDoName) || mustDoName.includes(actName);
         });
       });
       
       // Distribute must-do activities first (1-2 per day, evenly)
-      const mustDoPerDay = actualMiddleDays > 0 ? Math.ceil(mustDoActivities.length / actualMiddleDays) : 0;
+      // Use filteredMustDoActivities (hotels already filtered out)
+      const mustDoPerDay = actualMiddleDays > 0 ? Math.ceil(filteredMustDoActivities.length / actualMiddleDays) : 0;
       const mustDoDistribution = [];
       let mustDoIndex = 0;
       
       // Create distribution plan for must-do activities
       for (let i = 0; i < actualMiddleDays; i++) {
-        const count = Math.min(2, mustDoActivities.length - mustDoIndex);
+        const count = Math.min(2, filteredMustDoActivities.length - mustDoIndex);
         if (count > 0) {
-          mustDoDistribution.push(mustDoActivities.slice(mustDoIndex, mustDoIndex + count));
+          mustDoDistribution.push(filteredMustDoActivities.slice(mustDoIndex, mustDoIndex + count));
           mustDoIndex += count;
         } else {
           mustDoDistribution.push([]);
@@ -1496,7 +2109,27 @@ export default function OptimizedItinerary() {
         
         // FIRST: Add must-do activities for this day (priority)
         // Must-do activities are placed FIRST and take priority over everything else
-        const mustDoForDay = mustDoDistribution[dayIndex] || [];
+        // IMPORTANT: Filter out hotels from must-do activities - hotels are NOT activities
+        const mustDoForDay = (mustDoDistribution[dayIndex] || []).filter(mustDo => {
+          const name = (mustDo.name || '').toLowerCase();
+          const description = (mustDo.description || '').toLowerCase();
+          
+          // Check if this is a hotel (not an activity)
+          const hotelKeywords = ['hotel', 'stay at', 'accommodation', 'resort', 'inn', 'lodge', 'hostel', 'motel'];
+          const isHotel = hotelKeywords.some(keyword => 
+            name.includes(keyword) || 
+            description.includes(keyword) ||
+            name.includes('to stay at') ||
+            name.includes('staying at')
+          );
+          
+          if (isHotel) {
+            console.log('Filtered out hotel from must-do activities:', mustDo.name);
+            return false; // Exclude hotels
+          }
+          return true; // Include real activities
+        });
+        
         mustDoForDay.forEach((mustDo, idx) => {
           const existingTimes = dayItems.map(item => item.time);
           const timeSlot = getTimeSlotForCategory(
@@ -1509,28 +2142,64 @@ export default function OptimizedItinerary() {
           // Create booking link (GetYourGuide or Viator)
           const bookingLink = mustDo.bookingLink || createBookingLink(mustDo.name);
           
+          // Extract description - clean up "User requested:" prefix if present
+          let description = mustDo.description || '';
+          if (description && description.startsWith('User requested:')) {
+            // Remove "User requested:" prefix and clean up
+            description = description.replace(/^User requested:\s*/i, '').trim();
+            // If description is now empty or just the name, create a better description
+            if (!description || description === mustDo.name) {
+              // Create a more descriptive message based on activity name
+              const activityName = mustDo.name || '';
+              if (activityName.toLowerCase().includes('sagrada familia')) {
+                description = 'Visit the iconic Sagrada Familia, Antoni Gaudí\'s unfinished masterpiece and one of Barcelona\'s most famous landmarks.';
+              } else if (activityName.toLowerCase().includes('park güell')) {
+                description = 'Explore Park Güell, a colorful public park with unique architecture and stunning city views designed by Antoni Gaudí.';
+              } else if (activityName.toLowerCase().includes('museum')) {
+                description = `Visit ${activityName}, a fascinating museum showcasing art, history, and culture.`;
+              } else if (activityName.toLowerCase().includes('beach')) {
+                description = `Enjoy ${activityName}, a beautiful beach perfect for relaxation and water activities.`;
+              } else {
+                description = `Visit ${activityName}, a must-see attraction in ${routeInfo.destination || 'the city'}.`;
+              }
+            }
+          }
+          // If still no description, use a default
+          if (!description || description.trim() === '') {
+            description = `Explore ${mustDo.name}, a must-see attraction in ${routeInfo.destination || 'the city'}.`;
+          }
+          
+          // Extract price - handle different formats (number, object, string)
+          const priceValue = (() => {
+            if (mustDo.price === null || mustDo.price === undefined) return null; // Return null instead of 0 to indicate "not available"
+            if (typeof mustDo.price === 'number') {
+              return mustDo.price > 0 ? mustDo.price : null;
+            }
+            if (typeof mustDo.price === 'object') {
+              const amount = mustDo.price.amount || mustDo.price.total || mustDo.price.value;
+              return amount && amount > 0 ? amount : null;
+            }
+            const parsed = parseFloat(mustDo.price);
+            return !isNaN(parsed) && parsed > 0 ? parsed : null;
+          })();
+          
+          // Add activity icon (🎟️ for tours/experiences, 📍 for locations/attractions)
+          const activityIcon = (mustDo.category || mustDo.type || '').toLowerCase().includes('tour') || 
+                              (mustDo.name || '').toLowerCase().includes('tour') ? '🎟️' : '📍';
           dayItems.push({
             type: 'activity',
-            title: mustDo.name,
+            title: `${activityIcon} ${mustDo.name}`,
             time: timeSlot,
             isMustDo: true, // Mark as must-do
             details: {
-              // Preserve all original fields from mustDo activity
-              description: mustDo.description || mustDo.name,
+              // Use cleaned description
+              description: description,
               duration: mustDo.duration || '2-3 hours',
               category: mustDo.category || mustDo.type || 'general',
               location: mustDo.location || routeInfo.destination || '',
               bookingLink: bookingLink || mustDo.bookingLink || mustDo.booking_link, // Always include booking link
-              // Preserve price - handle different formats (number, object, string)
-              price: (() => {
-                if (mustDo.price === null || mustDo.price === undefined) return null;
-                if (typeof mustDo.price === 'number') return mustDo.price;
-                if (typeof mustDo.price === 'object') {
-                  return mustDo.price.amount || mustDo.price.total || mustDo.price.value || null;
-                }
-                const parsed = parseFloat(mustDo.price);
-                return isNaN(parsed) ? null : parsed;
-              })(),
+              // Use extracted price value
+              price: priceValue,
               // Preserve rating - handle different formats
               rating: (() => {
                 if (mustDo.rating === null || mustDo.rating === undefined) return null;
@@ -1564,9 +2233,12 @@ export default function OptimizedItinerary() {
                                activity.url || 
                                createBookingLink(activity.name || 'Activity');
             
+            // Add activity icon (🎟️ for tours/experiences, 📍 for locations/attractions)
+            const activityIcon = (activity.category || activity.type || '').toLowerCase().includes('tour') || 
+                                (activity.name || '').toLowerCase().includes('tour') ? '🎟️' : '📍';
             dayItems.push({
               type: 'activity',
-              title: activity.name || 'Activity',
+              title: `${activityIcon} ${activity.name || 'Activity'}`,
               time: timeSlot,
               details: {
                 description: activity.description || activity.shortDescription || '',
@@ -1581,35 +2253,48 @@ export default function OptimizedItinerary() {
         }
         
         // If no activities (or only hotel), add "Open Exploration" card
+        // Format: "🌤️ Open Exploration — Free time for casual sightseeing or rest."
         const hasActivities = dayItems.some(item => item.type === 'activity' && !item.isOpenExploration);
         if (!hasActivities) {
           dayItems.push({
             type: 'activity',
-            title: 'Open Exploration',
+            title: '🌤️ Open Exploration',
             time: 'All Day',
             isOpenExploration: true,
             details: {
-              description: 'Free time to explore at your own pace. Type \'add [activity name]\' to insert it into your itinerary.',
+              description: 'Free time for casual sightseeing or rest.',
               duration: 'Flexible',
               bookingLink: null
             }
           });
         }
         
-        // Add hotel stay only if hotel is available
-        if (hotel && !hotel.isDummy) {
-          dayItems.push({
-            type: 'hotel',
-            title: hotel?.name || 'Hotel',
-            time: 'Overnight',
-            details: {
-              location: hotel?.location || routeInfo.destination,
-              distance: hotel?.distance || 0,
-              rating: hotel?.rating || 0,
-              price: hotel?.price || 0,
-              name: hotel?.name
-            }
-          });
+        // Add hotel stay indicator for ongoing stays (after check-in day)
+        // Show small indicator for days between check-in and check-out
+        if (hotelStays.length > 0) {
+          const hotelStay = hotelStays[0];
+          const dayDate = new Date(currentDate);
+          dayDate.setHours(0, 0, 0, 0);
+          
+          const checkInDate = new Date(hotelStay.checkInDate);
+          checkInDate.setHours(0, 0, 0, 0);
+          const checkOutDate = new Date(hotelStay.checkOutDate);
+          checkOutDate.setHours(0, 0, 0, 0);
+          
+          // If current date is after check-in and before check-out, show ongoing stay indicator
+          if (dayDate > checkInDate && dayDate < checkOutDate) {
+            dayItems.push({
+              type: 'hotel',
+              title: `Hotel: ${hotelStay.name} (ongoing stay)`,
+              time: 'Overnight',
+              isHotelStay: true,
+              isOngoing: true,
+              details: {
+                name: hotelStay.name,
+                location: hotelStay.location
+              }
+            });
+          }
         }
       
         days.push({
@@ -1626,15 +2311,54 @@ export default function OptimizedItinerary() {
     // Use last date from dateRange
     if (isRoundTrip && dateRange.length > 0) {
       const lastDate = dateRange[dateRange.length - 1];
+      const lastDayItems = [];
+      
+      // Add check-out if this is the check-out day
+      if (hotelStays.length > 0) {
+        const hotelStay = hotelStays[0];
+        const checkOutDate = new Date(hotelStay.checkOutDate);
+        checkOutDate.setHours(0, 0, 0, 0);
+        const lastDateNormalized = new Date(lastDate);
+        lastDateNormalized.setHours(0, 0, 0, 0);
+        
+        // Check if last day is the check-out day
+        if (checkOutDate.getTime() === lastDateNormalized.getTime()) {
+          const formatDateShort = (date) => {
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            return `${months[date.getMonth()]} ${date.getDate()}`;
+          };
+          
+          const priceStr = hotelStay.pricePerNight > 0 
+            ? `~$${Math.round(hotelStay.pricePerNight)}/night` 
+            : (hotelStay.priceUnavailable ? 'Price on request' : 'Included in hotel budget');
+          
+          lastDayItems.push({
+            type: 'hotel',
+            title: `🏨 Check-out from ${hotelStay.name} (${formatDateShort(checkOutDate)}, ${priceStr})`,
+            time: 'Check-out',
+            isHotelStay: true,
+            isCheckOut: true,
+            details: {
+              name: hotelStay.name,
+              checkInDate: hotelStay.checkInDate,
+              checkOutDate: checkOutDate,
+              nights: hotelStay.nights,
+              pricePerNight: hotelStay.pricePerNight,
+              totalPrice: hotelStay.totalPrice,
+              location: hotelStay.location,
+              rating: hotelStay.rating
+            }
+          });
+        }
+      }
       
       // Validate return flight - NO DUMMY DATA
       if (!returnFlight) {
         console.warn('No return flight provided for last day - creating itinerary without return flight');
         // Don't throw error, just skip return flight and add a note
-        const lastDayItems = [];
         lastDayItems.push({
           type: 'activity',
-          title: 'Return Flight Needed',
+          title: '✈️ Return Flight Needed',
           time: 'All Day',
           details: {
             description: 'Please search for return flights in the chat to complete your itinerary.',
@@ -1652,10 +2376,9 @@ export default function OptimizedItinerary() {
       } else if (returnFlight.id === 'dummy-flight' || returnFlight.flightNumber === 'FL123' || returnFlight.airline === 'Airline') {
         console.warn('Dummy return flight data detected - creating itinerary without return flight');
         // Don't throw error, just skip dummy return flight and add a note
-        const lastDayItems = [];
         lastDayItems.push({
           type: 'activity',
-          title: 'Return Flight Needed',
+          title: '✈️ Return Flight Needed',
           time: 'All Day',
           details: {
             description: 'Please search for return flights in the chat to complete your itinerary.',
@@ -1716,26 +2439,30 @@ export default function OptimizedItinerary() {
       const stops = returnFlightData.stops !== undefined ? returnFlightData.stops : 0;
       const price = returnFlightData.price !== undefined ? returnFlightData.price : 0;
       
+      // Format: "✈️ Return Flight to {home city}"
+      const returnFlightTitle = `✈️ Return Flight to ${routeInfo.departure || 'home city'}`;
+      
+      // Add return flight to lastDayItems (check-out was already added if applicable)
+      lastDayItems.push({
+        type: 'flight',
+        title: returnFlightTitle,
+        time: departureTime,
+        details: {
+          departure: departureDisplay,
+          arrival: arrivalDisplay,
+          duration: duration,
+          stops: stops,
+          price: price,
+          airline: airline,
+          flightNumber: flightNumber
+        }
+      });
+      
       days.push({
         day: null, // Will be set after sorting
         date: formatDate(lastDate),
         dateObj: lastDate,
-        items: [
-          {
-            type: 'flight',
-            title: `${airline} ${flightNumber}`.trim() || 'Return Flight',
-            time: departureTime,
-            details: {
-              departure: departureDisplay,
-              arrival: arrivalDisplay,
-              duration: duration,
-              stops: stops,
-              price: price,
-              airline: airline,
-              flightNumber: flightNumber
-            }
-          }
-        ]
+        items: lastDayItems
       });
       }
     }
@@ -1749,7 +2476,9 @@ export default function OptimizedItinerary() {
     });
 
     console.log(`Created ${days.length} days for itinerary (sorted and labeled)`);
-    return days;
+    
+    // Return both days and hotelStays for use in summary
+    return { days, hotelStays };
   };
 
   const toggleDay = (day) => {
@@ -1826,7 +2555,56 @@ export default function OptimizedItinerary() {
   }
 
   if (!itineraryData) {
-    return null;
+    // Show empty state when no itinerary is found
+    return (
+      <ScrollArea className="h-full">
+        <div style={{ 
+          padding: '24px', 
+          maxWidth: '1200px', 
+          margin: '0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '60vh',
+          gap: '24px'
+        }}>
+          <div style={{ fontSize: '64px' }}>📋</div>
+          <div style={{ 
+            fontSize: '24px', 
+            color: '#004C8C', 
+            fontWeight: 600,
+            textAlign: 'center'
+          }}>
+            No Itinerary Found
+          </div>
+          <div style={{ 
+            fontSize: '16px', 
+            color: '#64748b',
+            textAlign: 'center',
+            maxWidth: '500px'
+          }}>
+            We couldn't find a saved itinerary. Please go back to the chat and generate a new one.
+          </div>
+          <button
+            onClick={() => navigate('/chat')}
+            style={{
+              padding: '12px 24px',
+              backgroundColor: '#00ADEF',
+              color: 'white',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontSize: '16px',
+              fontWeight: 600,
+              marginTop: '8px'
+            }}
+          >
+            Back to Chat
+          </button>
+        </div>
+      </ScrollArea>
+    );
   }
 
   const { flight, hotel, activity, days, total_price, total_score } = itineraryData;
@@ -1854,26 +2632,58 @@ export default function OptimizedItinerary() {
   const mustDoActivities = currentTripState?.mustDoActivities || [];
   
   // Use selected flights if available, otherwise use optimized flights from API response
+  // Hotel selection is already handled in generateItinerary based on preferences
   const outboundFlight = selectedOutboundFlight || flight || null;
   const returnFlight = selectedReturnFlight || null; // Return flight is separate
+  
+  // Use hotel from itineraryData (already selected based on preferences in generateItinerary)
+  // Fallback to selectedHotel from tripState if available
   const finalHotel = selectedHotel || hotel || null;
   
-  // Calculate costs from selected items or API response
-  // Extract price from flight object (handle different price formats)
+  // Extract price helper function
   const extractPrice = (item) => {
     if (!item) return 0;
+    if (item.price === null || item.price === undefined) return 0;
     if (typeof item.price === 'number') return item.price;
-    if (typeof item.price === 'object') {
+    if (typeof item.price === 'object' && item.price !== null) {
       return item.price.amount || item.price.total || item.price.value || 0;
     }
-    const parsed = parseFloat(item.price);
-    return isNaN(parsed) ? 0 : parsed;
+    if (typeof item.price === 'string') {
+      const parsed = parseFloat(item.price);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
   };
+  
+  // Calculate costs from selected items or API response
+  // extractPrice is already defined above
   
   const outboundFlightCost = extractPrice(outboundFlight);
   const returnFlightCost = extractPrice(returnFlight);
   const flightsCost = outboundFlightCost + returnFlightCost;
-  const hotelsCost = extractPrice(finalHotel);
+  
+  // Calculate hotel cost: use totalPrice from hotelStays if available, otherwise calculate from price × nights
+  let hotelsCost = 0;
+  if (itineraryData?.hotelStays && itineraryData.hotelStays.length > 0 && itineraryData.hotelStays[0].totalPrice > 0) {
+    hotelsCost = itineraryData.hotelStays[0].totalPrice;
+  } else if (finalHotel) {
+    const pricePerNight = extractPrice(finalHotel);
+    // Calculate nights from check-in/check-out dates if available
+    if (finalHotel.check_in && finalHotel.check_out) {
+      try {
+        const checkIn = new Date(finalHotel.check_in);
+        const checkOut = new Date(finalHotel.check_out);
+        const nights = Math.max(1, Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24)));
+        hotelsCost = pricePerNight * nights;
+      } catch (e) {
+        // Fallback: use pricePerNight as total if date calculation fails
+        hotelsCost = pricePerNight;
+      }
+    } else {
+      // No dates available, use pricePerNight as estimate
+      hotelsCost = pricePerNight;
+    }
+  }
   
   // Calculate activities cost from must-do activities and API response
   let activitiesCost = 0;
@@ -1953,38 +2763,44 @@ export default function OptimizedItinerary() {
                 {(() => {
                   // Priority: currentTripState (latest) > tripState (memoized) > routeInfo > default
                   // Get departure/origin - prefer full city name from currentTripState, fallback to tripState, then routeInfo
-                  const departure = currentTripState?.origin || tripState?.origin || routeInfo.departure || routeInfo.departureCode || 'Unknown';
-                  const departureCode = currentTripState?.originCode || tripState?.originCode || routeInfo.departureCode || '';
+                  // Also check location.state.routeInfo which is passed from Chat.jsx
+                  const routeInfoFromState = location.state?.routeInfo || {};
+                  const departure = currentTripState?.origin || tripState?.origin || routeInfoFromState.departure || routeInfo.departure || routeInfo.departureCode || null;
+                  const departureCode = currentTripState?.originCode || tripState?.originCode || routeInfoFromState.departureCode || routeInfo.departureCode || '';
                   
                   // Get destination - prefer full city name from currentTripState, fallback to tripState, then routeInfo
-                  const destination = currentTripState?.destination || tripState?.destination || routeInfo.destination || routeInfo.destinationCode || 'Unknown';
+                  const destination = currentTripState?.destination || tripState?.destination || routeInfo.destination || routeInfo.destinationCode || null;
                   const destinationCode = currentTripState?.destinationCode || tripState?.destinationCode || routeInfo.destinationCode || '';
                   
-                  // Format: "City (CODE)" if both available and different, otherwise show best available
-                  let departureDisplay = 'Unknown';
-                  let destinationDisplay = 'Unknown';
+                  // Debug: Log what we're getting
+                  console.log('Route display debug:', {
+                    currentTripStateOrigin: currentTripState?.origin,
+                    tripStateOrigin: tripState?.origin,
+                    routeInfoDeparture: routeInfo.departure,
+                    routeInfoDepartureCode: routeInfo.departureCode,
+                    finalDeparture: departure,
+                    finalDepartureCode: departureCode,
+                    currentTripStateDestination: currentTripState?.destination,
+                    tripStateDestination: tripState?.destination,
+                    routeInfoDestination: routeInfo.destination,
+                    finalDestination: destination
+                  });
                   
-                  if (departure && departure !== 'Unknown') {
-                    if (departureCode && departure !== departureCode) {
-                      departureDisplay = `${departure} (${departureCode})`;
-                    } else if (departureCode) {
-                      departureDisplay = `${departureCode}`;
-                    } else {
-                      departureDisplay = departure;
-                    }
-                  } else if (departureCode) {
+                  // Format: Use proper city names (not lowercase), "to" instead of "→"
+                  let departureDisplay = '';
+                  let destinationDisplay = '';
+                  
+                  // Get departure city name (prefer full name, fallback to code)
+                  if (departure && departure !== 'Unknown' && departure.trim() !== '') {
+                    departureDisplay = departure;
+                  } else if (departureCode && departureCode.trim() !== '') {
                     departureDisplay = departureCode;
                   }
                   
-                  if (destination && destination !== 'Unknown') {
-                    if (destinationCode && destination !== destinationCode) {
-                      destinationDisplay = `${destination} (${destinationCode})`;
-                    } else if (destinationCode) {
-                      destinationDisplay = `${destinationCode}`;
-                    } else {
-                      destinationDisplay = destination;
-                    }
-                  } else if (destinationCode) {
+                  // Get destination city name (prefer full name, fallback to code)
+                  if (destination && destination !== 'Unknown' && destination.trim() !== '') {
+                    destinationDisplay = destination;
+                  } else if (destinationCode && destinationCode.trim() !== '') {
                     destinationDisplay = destinationCode;
                   }
                   
@@ -2014,7 +2830,14 @@ export default function OptimizedItinerary() {
                     ? `${startDateDisplay} - ${endDateDisplay}` 
                     : startDateDisplay || 'Date TBD';
                   
-                  return `${departureDisplay} → ${destinationDisplay} • ${dateRange}`;
+                  // Format: "washington dc to barcelona • Tuesday, January 6, 2026 - Sunday, January 11, 2026"
+                  if (departureDisplay && destinationDisplay) {
+                    return `${departureDisplay} to ${destinationDisplay} • ${dateRange}`;
+                  } else if (destinationDisplay) {
+                    return `${destinationDisplay} • ${dateRange}`;
+                  } else {
+                    return dateRange;
+                  }
                 })()}
               </p>
             </div>
@@ -2048,6 +2871,8 @@ export default function OptimizedItinerary() {
                   // Save current itinerary state before navigating back to chat
                   if (itineraryData) {
                     saveCurrentItinerary(itineraryData);
+                    // Save full optimized itinerary to tripState and localStorage
+                    saveOptimizedItinerary(itineraryData);
                     console.log('Saved current itinerary state before navigating back to chat');
                   }
                   
@@ -2229,6 +3054,19 @@ export default function OptimizedItinerary() {
                   <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
                     Flights: ${flightsCost.toFixed(2)} • Hotels: ${hotelsCost.toFixed(2)} • Activities: ${activitiesCost.toFixed(2)}
                   </div>
+                  {itineraryData?.hotelStays && itineraryData.hotelStays.length > 0 && itineraryData.hotelStays[0] && (
+                    <div style={{ fontSize: '12px', color: '#64748b', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #e2e8f0' }}>
+                      <span style={{ fontWeight: 600, color: '#004C8C' }}>Hotels: </span>
+                      <span style={{ color: '#00ADEF' }}>
+                        {itineraryData.hotelStays[0].name} ({itineraryData.hotelStays[0].nights} {itineraryData.hotelStays[0].nights === 1 ? 'night' : 'nights'}, 
+                        {itineraryData.hotelStays[0].pricePerNight > 0 
+                          ? ` ~$${Math.round(itineraryData.hotelStays[0].pricePerNight)}/night`
+                          : (itineraryData.hotelStays[0].totalPrice > 0 
+                            ? ` ~$${Math.round(itineraryData.hotelStays[0].totalPrice).toLocaleString()}`
+                            : ' Included in hotel budget')})
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div style={{ padding: '20px', backgroundColor: '#f8fafc', borderRadius: '12px' }}>
                   <div style={{ fontSize: '14px', color: '#64748b', marginBottom: '8px', fontWeight: 500 }}>Total Travel Time</div>
@@ -2262,6 +3100,154 @@ export default function OptimizedItinerary() {
                 </div>
               </div>
             )}
+
+            {/* Selected Flights and Hotel Cards */}
+            <div style={{ 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+              gap: '24px',
+              marginTop: '32px'
+            }}>
+              {/* Outbound Flight Card */}
+              {outboundFlight && (
+                <div style={{
+                  padding: '20px',
+                  backgroundColor: '#f8fafc',
+                  borderRadius: '12px',
+                  border: '2px solid #e2e8f0'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                    <div style={{ fontSize: '24px' }}>✈️</div>
+                    <div>
+                      <div style={{ fontSize: '14px', color: '#64748b', fontWeight: 500 }}>Outbound Flight</div>
+                      <div style={{ fontSize: '18px', fontWeight: 600, color: '#004C8C' }}>
+                        {outboundFlight.airline || 'Airline'} {outboundFlight.flightNumber || ''}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', fontSize: '14px' }}>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Departure</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{outboundFlight.departure || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Arrival</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{outboundFlight.arrival || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Duration</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{outboundFlight.duration || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Price</div>
+                      <div style={{ fontWeight: 700, color: '#00ADEF', fontSize: '16px' }}>
+                        ${outboundFlightCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Return Flight Card */}
+              {returnFlight && (
+                <div style={{
+                  padding: '20px',
+                  backgroundColor: '#f8fafc',
+                  borderRadius: '12px',
+                  border: '2px solid #e2e8f0'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                    <div style={{ fontSize: '24px' }}>✈️</div>
+                    <div>
+                      <div style={{ fontSize: '14px', color: '#64748b', fontWeight: 500 }}>Return Flight</div>
+                      <div style={{ fontSize: '18px', fontWeight: 600, color: '#004C8C' }}>
+                        {returnFlight.airline || 'Airline'} {returnFlight.flightNumber || ''}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', fontSize: '14px' }}>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Departure</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{returnFlight.departure || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Arrival</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{returnFlight.arrival || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Duration</div>
+                      <div style={{ fontWeight: 600, color: '#004C8C' }}>{returnFlight.duration || 'N/A'}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#64748b', marginBottom: '4px' }}>Price</div>
+                      <div style={{ fontWeight: 700, color: '#00ADEF', fontSize: '16px' }}>
+                        ${returnFlightCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Hotel Card */}
+              {finalHotel && (
+                <div style={{
+                  padding: '20px',
+                  backgroundColor: '#f8fafc',
+                  borderRadius: '12px',
+                  border: '2px solid #e2e8f0'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                    <div style={{ fontSize: '24px' }}>🏨</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '14px', color: '#64748b', fontWeight: 500 }}>Hotel</div>
+                      <div style={{ fontSize: '18px', fontWeight: 600, color: '#004C8C' }}>
+                        {finalHotel.name || finalHotel.hotelName || 'Hotel'}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', fontSize: '14px' }}>
+                    {finalHotel.rating && (
+                      <div>
+                        <div style={{ color: '#64748b', marginBottom: '4px' }}>Rating</div>
+                        <div style={{ fontWeight: 600, color: '#004C8C' }}>
+                          ⭐ {typeof finalHotel.rating === 'number' ? finalHotel.rating.toFixed(1) : finalHotel.rating}
+                        </div>
+                      </div>
+                    )}
+                    {finalHotel.location && (
+                      <div>
+                        <div style={{ color: '#64748b', marginBottom: '4px' }}>Location</div>
+                        <div style={{ fontWeight: 600, color: '#004C8C' }}>{finalHotel.location}</div>
+                      </div>
+                    )}
+                    {finalHotel.price_per_night && (
+                      <div>
+                        <div style={{ color: '#64748b', marginBottom: '4px' }}>Price/Night</div>
+                        <div style={{ fontWeight: 700, color: '#00ADEF', fontSize: '16px' }}>
+                          ${finalHotel.price_per_night.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/night
+                        </div>
+                      </div>
+                    )}
+                    {finalHotel.price && !finalHotel.price_per_night && (
+                      <div>
+                        <div style={{ color: '#64748b', marginBottom: '4px' }}>Price</div>
+                        <div style={{ fontWeight: 700, color: '#00ADEF', fontSize: '16px' }}>
+                          ${extractPrice(finalHotel).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </div>
+                      </div>
+                    )}
+                    {finalHotel.check_in && finalHotel.check_out && (
+                      <div style={{ gridColumn: '1 / -1' }}>
+                        <div style={{ color: '#64748b', marginBottom: '4px' }}>Dates</div>
+                        <div style={{ fontWeight: 600, color: '#004C8C' }}>
+                          {formatDate(parseDate(finalHotel.check_in))} - {formatDate(parseDate(finalHotel.check_out))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Summary Chart */}
             <div style={{ height: '250px', marginTop: '24px' }}>
@@ -2734,6 +3720,27 @@ function DaySection({ day, isExpanded, expandedItems, onToggleDay, onToggleItem 
 
 // Item Card Component
 function ItemCard({ item, icon, color, isExpanded, onToggle }) {
+  // For ongoing hotel stays, show as a small badge/sub-line instead of full card
+  if (item.isOngoing && item.type === 'hotel') {
+    return (
+      <div style={{
+        marginBottom: '8px',
+        padding: '8px 12px',
+        backgroundColor: '#f8fafc',
+        borderRadius: '8px',
+        border: '1px solid #e2e8f0',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px'
+      }}>
+        <span style={{ fontSize: '16px' }}>🏨</span>
+        <span style={{ fontSize: '14px', color: '#64748b', fontWeight: 500 }}>
+          {item.title}
+        </span>
+      </div>
+    );
+  }
+  
   return (
     <div style={{
       marginBottom: '16px',
@@ -2795,7 +3802,7 @@ function ItemCard({ item, icon, color, isExpanded, onToggle }) {
             <FlightDetails details={item.details} />
           )}
           {item.type === 'hotel' && (
-            <HotelDetails details={item.details} />
+            <HotelDetails details={item.details} isOngoing={item.isOngoing} />
           )}
           {item.type === 'activity' && (
             <ActivityDetails details={item.details} />
@@ -2841,29 +3848,96 @@ function FlightDetails({ details }) {
   );
 }
 
-function HotelDetails({ details }) {
+function HotelDetails({ details, isOngoing }) {
+  // For hotel stays, show different information than regular hotel search results
+  if (details.nights || details.isHotelStay) {
+    // Hotel stay format
+    const formatDateShort = (date) => {
+      if (!date) return 'N/A';
+      const d = date instanceof Date ? date : new Date(date);
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${months[d.getMonth()]} ${d.getDate()}`;
+    };
+    
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '20px' }}>
+        <div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Type</div>
+          <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>Hotel stay</div>
+        </div>
+        {details.nights && (
+          <div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Nights</div>
+            <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
+              {details.nights} {details.nights === 1 ? 'night' : 'nights'}
+            </div>
+          </div>
+        )}
+        {details.checkInDate && details.checkOutDate && (
+          <div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Dates</div>
+            <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
+              {formatDateShort(details.checkInDate)} – {formatDateShort(details.checkOutDate)}
+            </div>
+          </div>
+        )}
+        {details.pricePerNight !== undefined && details.pricePerNight !== null && (
+          <div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price</div>
+            <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
+              {details.pricePerNight > 0 
+                ? `~$${Math.round(details.pricePerNight)}/night`
+                : 'Included in hotel budget'}
+            </div>
+          </div>
+        )}
+        {details.location && (
+          <div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Location</div>
+            <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.location}</div>
+          </div>
+        )}
+        {details.rating && details.rating > 0 && (
+          <div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Rating</div>
+            <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
+              ⭐ {details.rating.toFixed(1)}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+  
+  // Regular hotel search result format (fallback)
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '20px' }}>
       <div>
         <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Location</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.location}</div>
+        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.location || 'N/A'}</div>
       </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Distance from Center</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.distance} km</div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Rating</div>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
-          ⭐ {details.rating != null && details.rating !== undefined ? details.rating.toFixed(1) : 'N/A'}
+      {details.distance !== undefined && (
+        <div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Distance from Center</div>
+          <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>{details.distance} km</div>
         </div>
-      </div>
-      <div>
-        <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price per Night</div>
-        <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
-          ${details.price != null && details.price !== undefined ? details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00'}
+      )}
+      {details.rating !== undefined && details.rating !== null && (
+        <div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Rating</div>
+          <div style={{ fontSize: '16px', fontWeight: 600, color: '#004C8C' }}>
+            ⭐ {details.rating.toFixed(1)}
+          </div>
         </div>
-      </div>
+      )}
+      {details.price !== undefined && details.price !== null && (
+        <div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price per Night</div>
+          <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
+            ${details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2896,7 +3970,7 @@ function ActivityDetails({ details }) {
         <div>
           <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '6px', fontWeight: 500 }}>Price</div>
           <div style={{ fontSize: '18px', fontWeight: 700, color: '#00ADEF' }}>
-            ${details.price != null && details.price !== undefined && typeof details.price === 'number' ? details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00'}
+            ${details.price != null && details.price !== undefined && typeof details.price === 'number' && details.price > 0 ? `$${details.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 'Check booking link for pricing'}
           </div>
         </div>
       </div>

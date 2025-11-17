@@ -25,20 +25,12 @@ const TripPreferencesForm = ({ onComplete }) => {
     setResults(null);
 
     const weights = normalizeWeights(budget, quality, convenience);
-    console.log('[TripPreferencesForm] Normalized weights:', JSON.stringify(weights, null, 2));
-    console.log('[TripPreferencesForm] Raw values - budget:', budget, 'quality:', quality, 'convenience:', convenience);
-    console.log('[TripPreferencesForm] Budget weight:', weights.budget);
-    console.log('[TripPreferencesForm] Quality weight:', weights.quality);
-    console.log('[TripPreferencesForm] Convenience weight:', weights.convenience);
 
     try {
       const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
       const base = isLocalhost 
         ? 'http://localhost:8000'
         : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
-
-      console.log('Sending trip optimization request to:', `${base}/api/optimizeTrip`);
-      console.log('Request payload:', weights);
 
       const response = await fetch(`${base}/api/optimizeTrip`, {
         method: 'POST',
@@ -48,8 +40,6 @@ const TripPreferencesForm = ({ onComplete }) => {
         body: JSON.stringify(weights),
       });
 
-      console.log('Response status:', response.status);
-
       if (!response.ok) {
         const errorText = await response.text();
         console.error('Error response:', errorText);
@@ -57,7 +47,6 @@ const TripPreferencesForm = ({ onComplete }) => {
       }
 
       const data = await response.json();
-      console.log('Trip optimization response:', data);
       setResults(data);
       
       // Call onComplete callback with preferences
@@ -66,7 +55,6 @@ const TripPreferencesForm = ({ onComplete }) => {
           preferences: weights,
           rawValues: { budget, quality, convenience }
         };
-        console.log('[TripPreferencesForm] Calling onComplete with:', JSON.stringify(preferencesData, null, 2));
         onComplete(preferencesData);
       }
     } catch (err) {

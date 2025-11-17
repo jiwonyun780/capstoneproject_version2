@@ -53,8 +53,8 @@ def format_flight_for_dashboard(
     
     # Process flight offers
     all_prices = []
-    seen_outbound_keys = set()  # 중복 체크를 위한 set (outbound 항공편)
-    seen_return_keys = set()    # 중복 체크를 위한 set (return 항공편)
+    seen_outbound_keys = set()  # Set for duplicate check (outbound flights)
+    seen_return_keys = set()    # Set for duplicate check (return flights)
     
     if "flights" in flight_data and flight_data["flights"]:
         for flight in flight_data["flights"]:
@@ -73,8 +73,8 @@ def format_flight_for_dashboard(
                         flight, itineraries[0], 0, price
                     )
                     if outbound_flight:
-                        # 항공편을 고유하게 식별하는 키 생성
-                        # airline + flightNumber + departure time + arrival time 조합
+                        # Generate unique key to identify flight
+                        # Combination of airline + flightNumber + departure time + arrival time
                         outbound_key = (
                             outbound_flight.get('airline', ''),
                             outbound_flight.get('flightNumber', ''),
@@ -83,7 +83,7 @@ def format_flight_for_dashboard(
                             outbound_flight.get('duration', '')
                         )
                         
-                        # 중복 체크: 이미 추가된 항공편이 아니면 추가
+                        # Duplicate check: add only if not already added
                         if outbound_key not in seen_outbound_keys:
                             seen_outbound_keys.add(outbound_key)
                             formatted_response["outboundFlights"].append(outbound_flight)
@@ -97,7 +97,7 @@ def format_flight_for_dashboard(
                         flight, itineraries[1], 1, price
                     )
                     if return_flight:
-                        # Return 항공편도 동일하게 중복 체크
+                        # Return flights: same duplicate check
                         return_key = (
                             return_flight.get('airline', ''),
                             return_flight.get('flightNumber', ''),

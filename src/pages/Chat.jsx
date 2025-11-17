@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import TripPreferencesForm from '../components/TripPreferencesForm';
-import { recordTripSelection, loadTripState, saveTripState, updateTripRoute, loadCurrentItinerary, loadConversation, saveConversation, clearConversation, recordMustDoActivities, selectOutboundFlight, selectReturnFlight } from '../utils/tripState';
+import { recordTripSelection, loadTripState, saveTripState, updateTripRoute, loadCurrentItinerary, loadConversation, saveConversation, clearConversation, resetAllTripData, recordMustDoActivities, selectOutboundFlight, selectReturnFlight, updateHotelPreferences, loadOptimizedItinerary, saveOptimizedItinerary, selectHotel } from '../utils/tripState';
 
 // Helper function to convert date string to ISO format (YYYY-MM-DD)
 const formatDateToISO = (dateStr) => {
@@ -159,6 +159,8 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   const [onboardingComplete, setOnboardingComplete] = useState(location.state?.restoreConversation || false);
   const [userPreferences, setUserPreferences] = useState(null);
   const [hasExistingItinerary, setHasExistingItinerary] = useState(location.state?.hasExistingItinerary || false);
+  const [showTripChoiceBanner, setShowTripChoiceBanner] = useState(false);
+  const [showNewTripConfirm, setShowNewTripConfirm] = useState(false);
   const scrollRef = useRef(null);
   const pendingMessageSentRef = useRef(false);
 
@@ -170,6 +172,47 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     // Note: We don't save to localStorage so the form shows every time the user visits
   };
 
+  // Function to start a new trip - clears everything and initializes fresh
+  const handleStartNewTrip = async () => {
+    // Clear all saved data
+    resetAllTripData();
+    
+    // Reset state
+    setMessages([]);
+    setSessionId(null);
+    setContext(null);
+    setUserPreferences(null);
+    setHasExistingItinerary(false);
+    setShowTripChoiceBanner(false);
+    setShowNewTripConfirm(false);
+    
+    // Initialize fresh chat
+    const locationContext = await getLocationContext();
+    setContext(locationContext);
+    
+    // Generate new session ID
+    const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    setSessionId(newSessionId);
+    
+    // Create fresh welcome message
+    let welcomeMessage = "Great, let's start a new trip. Where would you like to go?";
+    
+    if (locationContext.user_location.city && locationContext.user_location.country) {
+      welcomeMessage = `Great, let's start a new trip. I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}. Where would you like to go?`;
+    } else if (locationContext.user_location.country) {
+      welcomeMessage = `Great, let's start a new trip. I can see you're in ${locationContext.user_location.country}. Where would you like to go?`;
+    }
+    
+    setMessages([{
+      role: 'assistant',
+      content: welcomeMessage,
+      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    }]);
+    
+    setIsLoadingContext(false);
+    setOnboardingComplete(true);
+  };
+
   // Initialize context and welcome message
   useEffect(() => {
     const initializeChat = async () => {
@@ -178,22 +221,26 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         const navigationEntry = performance.getEntriesByType('navigation')[0];
         const isRefresh = navigationEntry && navigationEntry.type === 'reload';
         
-        // If refresh, clear saved conversation and start fresh
-        if (isRefresh) {
-          console.log('Refresh detected - clearing saved conversation');
-          clearConversation();
-        }
-        
         // Check if we should restore conversation (from Back to Results flow)
+        // This check must come BEFORE refresh check to preserve conversation when navigating back
         const shouldRestore = location.state?.restoreConversation || false;
         const hasItinerary = location.state?.hasExistingItinerary || false;
+        
+        console.log('Chat initialization:', {
+          isRefresh,
+          shouldRestore,
+          hasItinerary,
+          locationState: location.state
+        });
         
         if (hasItinerary) {
           setHasExistingItinerary(true);
         }
         
         // If Back to Results was clicked, skip preference form and restore saved conversation
+        // IMPORTANT: Do this BEFORE checking for refresh, so we don't clear data when navigating back
         if (shouldRestore && !isRefresh) {
+          console.log('Back to Results detected - restoring conversation');
           // Always skip preference form when coming from Back to Results
           setOnboardingComplete(true);
           
@@ -216,7 +263,33 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
             return; // Don't initialize new chat if restoring saved conversation
           } else {
             // No saved conversation, but still skip preference form (user wants to edit itinerary)
-            console.log('Back to Results: No saved conversation, but skipping preference form');
+            console.log('Back to Results: No saved conversation found, trying to load from tripState');
+            
+            // Try to load from tripState directly (fallback)
+            const tripState = loadTripState();
+            const savedConv = tripState?.savedConversation;
+            
+            if (savedConv && savedConv.messages && savedConv.messages.length > 0) {
+              console.log('Found saved conversation in tripState:', savedConv.messages.length, 'messages');
+              setMessages(savedConv.messages);
+              if (savedConv.sessionId) {
+                setSessionId(savedConv.sessionId);
+              }
+              if (savedConv.context) {
+                setContext(savedConv.context);
+              }
+              if (savedConv.userPreferences) {
+                setUserPreferences(savedConv.userPreferences);
+              }
+              if (tripState?.currentItinerary) {
+                setHasExistingItinerary(true);
+              }
+              setIsLoadingContext(false);
+              return;
+            }
+            
+            // Still no saved conversation, but skip preference form
+            console.log('Back to Results: No saved conversation found, initializing welcome message');
             // Initialize chat with welcome message for continuing itinerary
             const locationContext = await getLocationContext();
             setContext(locationContext);
@@ -242,9 +315,19 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
               timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
             }]);
             
+            if (tripState?.currentItinerary) {
+              setHasExistingItinerary(true);
+            }
             setIsLoadingContext(false);
             return; // Don't continue to normal initialization
           }
+        }
+        
+        // If refresh AND not restoring conversation, clear all saved data
+        // IMPORTANT: Only clear on refresh if NOT coming from Back to Results
+        if (isRefresh && !shouldRestore) {
+          console.log('Refresh detected (not from Back to Results) - clearing all saved data');
+          resetAllTripData();
         }
         
         // No saved conversation - initialize new chat
@@ -664,6 +747,232 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     if (detectedActivities.length > 0) {
       console.log('Detected must-do activities:', detectedActivities);
       recordMustDoActivities(detectedActivities);
+      
+      // If activity is detected but message doesn't contain "activities" keyword,
+      // add it to help Backend trigger activity_search
+      if (!textLower.includes('activities') && !textLower.includes('activity') && !textLower.includes('search')) {
+        // Get destination from tripState to help with activity search
+        const tripState = loadTripState();
+        const destination = tripState?.destination || tripState?.destinationCode;
+        
+        if (destination) {
+          // Modify the message to include activity search keywords
+          // This will help Backend trigger activity_search
+          const activityNames = detectedActivities.map(a => a.name).join(', ');
+          text = `${text} Please search for activities in ${destination} including ${activityNames}.`;
+          console.log('Enhanced message for activity search:', text);
+        }
+      }
+    }
+    
+    // Detect if user wants to book a hotel
+    const wantsToBookHotel = /(?:I want to book|I'd like to book|book this|book that|book the|예약하고 싶어|예약하고 싶다|예약하고 싶습니다|예약할래|예약해줘)/i.test(text);
+    
+    if (wantsToBookHotel) {
+      // Extract hotel name from context (check previous messages or current message)
+      const hotelNameMatch = text.match(/(?:book|예약)\s+(?:this|that|the)?\s*([A-Z][a-zA-Z\s&]+?)(?:\s|$|,|\.|호텔)/i) ||
+                            text.match(/(?:Hotel|Resort|Inn|Lodge)\s+([A-Z][a-zA-Z\s&]+?)(?:\s|$|,|\.)/i);
+      
+      // Also check previous messages for hotel mentions
+      let hotelName = null;
+      if (hotelNameMatch && hotelNameMatch[1]) {
+        hotelName = hotelNameMatch[1].trim();
+      } else {
+        // Look for hotel name in previous assistant messages
+        const previousMessages = messages.filter(m => m.role === 'assistant').slice(-3);
+        for (const msg of previousMessages) {
+          const hotelMatch = msg.content?.match(/(?:Hotel|Resort|Inn|Lodge)\s+([A-Z][a-zA-Z\s&]+?)(?:\s|$|,|\.|\))/i);
+          if (hotelMatch && hotelMatch[1]) {
+            hotelName = hotelMatch[1].trim();
+            break;
+          }
+        }
+      }
+      
+      // Get destination from tripState
+      const tripState = loadTripState();
+      const destination = tripState?.destination || tripState?.destinationCode || '';
+      
+      if (hotelName || destination) {
+        // Generate booking links
+        const hotelNameEncoded = hotelName ? encodeURIComponent(hotelName).replace(/%20/g, '+') : '';
+        const destinationEncoded = destination ? encodeURIComponent(destination).replace(/%20/g, '+') : '';
+        
+        const bookingLinks = [];
+        if (hotelNameEncoded && destinationEncoded) {
+          bookingLinks.push(`[Booking.com](https://www.booking.com/searchresults.html?ss=${hotelNameEncoded}+${destinationEncoded})`);
+          bookingLinks.push(`[Expedia](https://www.expedia.com/Hotel-Search?destination=${destinationEncoded}&propertyName=${hotelNameEncoded})`);
+          bookingLinks.push(`[Hotels.com](https://www.hotels.com/search.do?destination=${destinationEncoded}&propertyName=${hotelNameEncoded})`);
+        } else if (destinationEncoded) {
+          bookingLinks.push(`[Booking.com](https://www.booking.com/searchresults.html?ss=${destinationEncoded})`);
+          bookingLinks.push(`[Expedia](https://www.expedia.com/Hotel-Search?destination=${destinationEncoded})`);
+          bookingLinks.push(`[Hotels.com](https://www.hotels.com/search.do?destination=${destinationEncoded})`);
+        }
+        
+        if (bookingLinks.length > 0) {
+          // Modify the message to include booking request
+          const bookingMessage = hotelName 
+            ? `I want to book ${hotelName}. Please provide booking links: ${bookingLinks.join(' | ')}`
+            : `I want to book a hotel in ${destination}. Please provide booking links: ${bookingLinks.join(' | ')}`;
+          text = `${text}\n\n${bookingMessage}`;
+          console.log('Added booking request to message:', bookingMessage);
+        }
+      }
+    }
+    
+    // Detect and save hotel preferences
+    const hotelPrefs = {};
+    let hasHotelMention = false;
+    
+    // Check for hotel-related keywords
+    const hotelKeywords = [
+      'hotel', 'hotels', 'accommodation', 'accommodations', 'stay', 'staying', 
+      'lodging', 'resort', 'inn', 'hostel', 'motel', '숙소', '호텔'
+    ];
+    hasHotelMention = hotelKeywords.some(keyword => textLower.includes(keyword));
+    
+    if (hasHotelMention) {
+      // Extract price constraints
+      // Patterns: "under $200", "below $200", "less than $200", "under 200 dollars", "밤당 200달러 이하"
+      const priceMaxPatterns = [
+        /(?:under|below|less than|maximum|max|at most|up to|이하|이내)\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|USD|per night|밤당|달러)?/i,
+        /\$(\d+(?:\.\d+)?)\s*(?:or less|or under|이하|이내)/i,
+        /(\d+)\s*(?:dollars?|USD)\s*(?:or less|or under|per night|밤당)?\s*(?:이하|이내)?/i
+      ];
+      
+      for (const pattern of priceMaxPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const price = parseFloat(match[1]);
+          if (!isNaN(price) && price > 0) {
+            hotelPrefs.priceMax = price;
+            console.log('Detected hotel price max:', price);
+            break;
+          }
+        }
+      }
+      
+      // Extract minimum price (less common)
+      const priceMinPatterns = [
+        /(?:at least|minimum|min|over|above|more than|최소|이상)\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:dollars?|USD|per night|밤당|달러)?/i,
+        /\$(\d+(?:\.\d+)?)\s*(?:or more|or above|이상)/i
+      ];
+      
+      for (const pattern of priceMinPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const price = parseFloat(match[1]);
+          if (!isNaN(price) && price > 0) {
+            hotelPrefs.priceMin = price;
+            console.log('Detected hotel price min:', price);
+            break;
+          }
+        }
+      }
+      
+      // Extract minimum rating
+      // Patterns: "at least 4.5 stars", "4.5 stars or above", "minimum 4.5", "별점 4.5 이상"
+      const ratingPatterns = [
+        /(?:at least|minimum|min|over|above|more than|최소|이상)\s*(\d+(?:\.\d+)?)\s*(?:stars?|star|별점|점)?/i,
+        /(\d+(?:\.\d+)?)\s*(?:stars?|star|별점|점)\s*(?:or above|or more|or higher|이상|이상의)/i,
+        /(?:rating|별점)\s*(?:of|at|is)?\s*(\d+(?:\.\d+)?)\s*(?:or above|or more|or higher|이상)?/i
+      ];
+      
+      for (const pattern of ratingPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const rating = parseFloat(match[1]);
+          if (!isNaN(rating) && rating >= 0 && rating <= 5) {
+            hotelPrefs.minimumRating = rating;
+            console.log('Detected hotel minimum rating:', rating);
+            break;
+          }
+        }
+      }
+      
+      // Extract preferred location
+      // Patterns: "near Las Ramblas", "close to waterfront", "in city center", "라스 람블라스 근처"
+      const locationPatterns = [
+        /(?:near|close to|by|around|in|at)\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.)/i,
+        /(?:waterfront|city center|downtown|beach|airport|시티센터|해변|공항)/i
+      ];
+      
+      // Common location keywords
+      const locationKeywords = [
+        'las ramblas', 'ramblas', 'waterfront', 'beach', 'city center', 'downtown',
+        'old town', 'gothic quarter', 'eixample', 'gràcia', 'barceloneta',
+        '시티센터', '해변', '공항', '구시가지'
+      ];
+      
+      for (const keyword of locationKeywords) {
+        if (textLower.includes(keyword)) {
+          hotelPrefs.preferredLocation = keyword;
+          console.log('Detected hotel preferred location:', keyword);
+          break;
+        }
+      }
+      
+      // If no keyword match, try pattern matching
+      if (!hotelPrefs.preferredLocation) {
+        for (const pattern of locationPatterns) {
+          const match = text.match(pattern);
+          if (match && match[1]) {
+            const location = match[1].trim();
+            // Filter out common false positives
+            if (location.length > 2 && 
+                !location.toLowerCase().includes('hotel') && 
+                !location.toLowerCase().includes('stay') &&
+                !location.toLowerCase().includes('accommodation')) {
+              hotelPrefs.preferredLocation = location;
+              console.log('Detected hotel preferred location:', location);
+              break;
+            }
+          }
+        }
+      }
+      
+      // Extract specific hotel name
+      // Patterns: "I want to stay at Hotel Arts Barcelona", "Hotel X에 묵고 싶어", "at Hotel X"
+      const specificHotelPatterns = [
+        // Pattern 1: "stay at Hotel X" or "want to stay at Hotel X" (must have Hotel prefix or proper name)
+        /(?:stay at|stay in|want to stay at|want to stay in|묵고 싶어|묵고 싶다|예약하고 싶어)\s+(?:Hotel\s+)?([A-ZÀ-ÿ][a-zA-ZÀ-ÿ\s&'-]{3,}?)(?:\s|$|,|\.|호텔)/i,
+        // Pattern 2: "book Hotel X" or "reserve Hotel X" (must have Hotel prefix - don't match "book hotel" alone)
+        /(?:book|reserve)\s+Hotel\s+([A-ZÀ-ÿ][a-zA-ZÀ-ÿ\s&'-]{3,}?)(?:\s|$|,|\.|호텔)/i,
+        // Pattern 3: "Hotel X" or "Resort X" (must have proper name after)
+        /(?:Hotel|Resort|Inn|Lodge)\s+([A-ZÀ-ÿ][a-zA-ZÀ-ÿ\s&'-]{3,}?)(?:\s|$|,|\.)/i
+      ];
+      
+      for (const pattern of specificHotelPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+          let hotelName = match[1].trim();
+          // Remove common suffixes
+          hotelName = hotelName.replace(/\s+(hotel|resort|inn|lodge|호텔)$/i, '').trim();
+          // Filter out generic words like "hotel", "a hotel", "the hotel", and single words that are just "hotel"
+          const genericWords = ['hotel', 'a hotel', 'the hotel', 'hotels', 'accommodation', 'place', 'a', 'the', 'an', 'de', 'la', 'le', 'les'];
+          const lowerName = hotelName.toLowerCase();
+          
+          // Must be at least 3 characters and not a generic word
+          // Also check if it's just "hotel" or starts with lowercase (likely not a proper name)
+          // Exclude if it's just "hotel" or "hotel de" or similar generic phrases
+          if (hotelName.length >= 3 && 
+              !genericWords.includes(lowerName) &&
+              !lowerName.startsWith('hotel') &&
+              !lowerName.startsWith('a hotel') &&
+              !lowerName.startsWith('the hotel') &&
+              !lowerName.match(/^hotel\s+(de|la|le|les)$/i)) {
+            hotelPrefs.specificName = hotelName;
+            console.log('Detected specific hotel name:', hotelName);
+            break;
+          }
+        }
+      }
+      
+      // Save hotel preferences if any were detected
+      if (Object.keys(hotelPrefs).length > 0) {
+        console.log('Saving hotel preferences:', hotelPrefs);
+        updateHotelPreferences(hotelPrefs);
+      }
     }
     
     // Check if user is requesting itinerary generation (explicit request)
@@ -1042,13 +1351,36 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           // Save optimalFlight to tripState if available in amadeus_data
           // Backend returns amadeus_data with outboundFlights and returnFlights
           const flightData = data.dashboardData || data.amadeus_data;
+          // Also check for activities directly in amadeus_data (for activity_search responses)
+          const activitiesFromData = flightData?.activities || data.amadeus_data?.activities || [];
+          console.log('Activities from API response:', {
+            hasFlightData: !!flightData,
+            hasAmadeusData: !!data.amadeus_data,
+            flightDataActivities: flightData?.activities,
+            amadeusDataActivities: data.amadeus_data?.activities,
+            activitiesFromData: activitiesFromData,
+            detectedActivities: detectedActivities,
+            fullAmadeusData: data.amadeus_data
+          });
+          
+          // Always check for activities, even if flightData is null (for activity-only requests)
+          const activities = flightData?.activities || data.amadeus_data?.activities || [];
+          
           if (flightData) {
-            const { outboundFlights, returnFlights, activities } = flightData;
+            const { outboundFlights, returnFlights } = flightData;
             const optimalOutbound = outboundFlights?.find(f => f.optimalFlight || f.isOptimal);
             const optimalReturn = returnFlights?.find(f => f.optimalFlight || f.isOptimal);
             
             // Update must-do activities with full details from API response
-            if (detectedActivities.length > 0 && activities && Array.isArray(activities)) {
+            if (detectedActivities.length > 0) {
+              console.log('Processing detected activities:', {
+                detectedCount: detectedActivities.length,
+                activitiesFromAPI: activities?.length || 0,
+                hasActivities: !!activities && Array.isArray(activities) && activities.length > 0
+              });
+              
+              if (activities && Array.isArray(activities) && activities.length > 0) {
+                console.log('Matching activities with API response. Activities count:', activities.length);
               const updatedActivities = detectedActivities.map(detected => {
                 // Try to find matching activity in API response by name
                 const matchingActivity = activities.find(apiAct => {
@@ -1060,14 +1392,35 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 });
                 
                 if (matchingActivity) {
+                  // Extract price - handle both object format {amount, currencyCode} and direct value
+                  let priceValue = null;
+                  if (matchingActivity.price) {
+                    if (typeof matchingActivity.price === 'object' && matchingActivity.price.amount !== undefined) {
+                      priceValue = matchingActivity.price.amount;
+                    } else if (typeof matchingActivity.price === 'number') {
+                      priceValue = matchingActivity.price;
+                    }
+                  }
+                  
+                  // Extract description - prefer full description, fallback to shortDescription
+                  const description = matchingActivity.description || 
+                                     matchingActivity.shortDescription || 
+                                     detected.description;
+                  
+                  // Extract duration - handle both minimumDuration and duration
+                  const duration = matchingActivity.minimumDuration || 
+                                  matchingActivity.duration || 
+                                  detected.duration;
+                  
                   // Merge detected activity with API activity details
                   return {
                     ...detected,
                     name: matchingActivity.name || matchingActivity.title || detected.name,
-                    description: matchingActivity.description || detected.description,
-                    duration: matchingActivity.duration || detected.duration,
+                    description: description,
+                    duration: duration,
                     rating: matchingActivity.rating || detected.rating,
-                    price: matchingActivity.price || detected.price,
+                    price: priceValue !== null ? priceValue : (detected.price || 0),
+                    currency: matchingActivity.price?.currencyCode || matchingActivity.currency || 'USD',
                     category: matchingActivity.category || matchingActivity.type || detected.category,
                     location: matchingActivity.location || detected.location,
                     bookingLink: matchingActivity.bookingLink || matchingActivity.booking_link || detected.bookingLink
@@ -1076,9 +1429,14 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 return detected;
               });
               
-              // Update must-do activities with full details
-              recordMustDoActivities(updatedActivities);
-              console.log('Updated must-do activities with API details:', updatedActivities);
+                // Update must-do activities with full details
+                recordMustDoActivities(updatedActivities);
+                console.log('Updated must-do activities with API details:', updatedActivities);
+              } else {
+                // No activities from API, but still save detected activities
+                console.log('No activities from API, saving detected activities as-is:', detectedActivities);
+                recordMustDoActivities(detectedActivities);
+              }
             }
             
             // Save selected flights to tripState
@@ -1157,11 +1515,16 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     let returnDate = null;
     let origin = null;
     
+    // Guard against null/undefined messageContent
+    if (!messageContent || typeof messageContent !== 'string') {
+      return { origin, destination, departureDate, returnDate };
+    }
+    
     // Try to extract origin and destination from various patterns
     // Pattern 1: "from X to Y" (full pattern)
     const fromToPattern = /from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
     const fromToMatch = messageContent.match(fromToPattern);
-    if (fromToMatch) {
+    if (fromToMatch && fromToMatch[1] && fromToMatch[2]) {
       origin = fromToMatch[1].trim().replace(/\.$/, '').trim();
       destination = fromToMatch[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
     }
@@ -1170,7 +1533,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     if (!fromToMatch || !origin || !destination) {
       const flightsPattern = /Flights?\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i;
       const flightsMatch = messageContent.match(flightsPattern);
-      if (flightsMatch) {
+      if (flightsMatch && flightsMatch[1] && flightsMatch[2]) {
         origin = origin || flightsMatch[1].trim().replace(/\.$/, '').trim();
         destination = destination || flightsMatch[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
       }
@@ -1179,7 +1542,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     // Pattern 3: "generate itinerary from X to Y"
     if (!origin || !destination) {
       const generatePattern = messageContent.match(/(?:generate|create|make|plan|show)\s+itinerary\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
-      if (generatePattern) {
+      if (generatePattern && generatePattern[1] && generatePattern[2]) {
         origin = origin || generatePattern[1].trim().replace(/\.$/, '').trim();
         destination = destination || generatePattern[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
       }
@@ -1189,7 +1552,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     if (!destination) {
       const toPattern = /\s+to\s+([A-Z][a-zA-Z\s]+?)(?:\s+from|\s+to|\s+on|\s|$|,|\.|\n)/i;
       const toMatch = messageContent.match(toPattern);
-      if (toMatch) {
+      if (toMatch && toMatch[1]) {
         destination = toMatch[1].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
       }
     }
@@ -1225,11 +1588,17 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       }
     }
     
-    return { destination, departureDate, returnDate };
+    return { origin, destination, departureDate, returnDate };
   };
 
   // Handle Generate Itinerary button click - navigate to itinerary page
   const handleGenerateItinerary = (messageContentOrData) => {
+    // Guard against null/undefined input
+    if (!messageContentOrData) {
+      console.warn('handleGenerateItinerary: messageContentOrData is null or undefined');
+      return;
+    }
+    
     // Check if this is an update to existing itinerary
     const isUpdateExisting = typeof messageContentOrData === 'string' && messageContentOrData.startsWith('UPDATE_EXISTING_ITINERARY:');
     let actualMessageContent = messageContentOrData;
@@ -1240,18 +1609,28 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       console.log('Updating existing itinerary with message:', actualMessageContent);
     }
     
+    // Ensure actualMessageContent is a string
+    if (typeof actualMessageContent !== 'string') {
+      actualMessageContent = String(actualMessageContent || '');
+    }
+    
     // Try to parse as JSON first (if it contains route data from MessageBubble)
     let routeData = null;
     let messageContent = actualMessageContent;
     
     try {
       routeData = JSON.parse(actualMessageContent);
-      if (routeData.messageContent) {
-        messageContent = routeData.messageContent;
+      if (routeData && routeData.messageContent) {
+        messageContent = routeData.messageContent || '';
       }
     } catch (e) {
       // Not JSON, treat as plain message content
-      messageContent = actualMessageContent;
+      messageContent = actualMessageContent || '';
+    }
+    
+    // Ensure messageContent is always a string
+    if (typeof messageContent !== 'string') {
+      messageContent = String(messageContent || '');
     }
     
     // Use dashboardData if available (most reliable)
@@ -1293,7 +1672,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     if (routeData && routeData.flightSummary) {
       const summary = routeData.flightSummary;
       // Extract from message content if summary doesn't have all info
-      const msgContent = routeData.messageContent || messageContent;
+      const msgContent = (routeData.messageContent || messageContent || '').toString();
       
       // Try to extract route from message patterns
       const routeMatch = msgContent.match(/from\s+([^to]+)\s+to\s+([^\n]+)/i);
@@ -1302,7 +1681,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       let departureCode = summary.originCode || '';
       let destinationCode = summary.destCode || '';
       
-      if (routeMatch) {
+      if (routeMatch && routeMatch[1] && routeMatch[2]) {
         departure = routeMatch[1].trim();
         destination = routeMatch[2].trim().split(/\s+/)[0];
       }
@@ -1378,8 +1757,20 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     // Fallback: Extract from message content if tripState doesn't have it
     const tripInfo = extractTripInfo(messageContent);
     
-    if (!departure) departure = tripInfo.origin || 'Unknown';
-    if (!destination) destination = tripInfo.destination || 'Unknown';
+    console.log('=== extractTripInfo result ===');
+    console.log('tripInfo:', tripInfo);
+    console.log('tripInfo.origin:', tripInfo.origin);
+    console.log('tripInfo.destination:', tripInfo.destination);
+    
+    // Use extractTripInfo result if current values are Unknown or null
+    if ((!departure || departure === 'Unknown' || departure === null) && tripInfo.origin) {
+      departure = tripInfo.origin;
+      console.log('Using tripInfo.origin as departure:', departure);
+    }
+    if ((!destination || destination === 'Unknown' || destination === null) && tripInfo.destination) {
+      destination = tripInfo.destination;
+      console.log('Using tripInfo.destination as destination:', destination);
+    }
     if (!departureCode) departureCode = '';
     if (!destinationCode) destinationCode = '';
     if (!departureDate) departureDate = tripInfo.departureDate || null;
@@ -1389,19 +1780,32 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     // Pattern 1: "from X to Y" (full pattern)
     const routeMatch = messageContent.match(/from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
     
-    if (departure === 'Unknown' && routeMatch) {
+    if (departure === 'Unknown' && routeMatch && routeMatch[1]) {
       departure = routeMatch[1].trim();
       departure = departure.replace(/\.$/, '').trim();
     }
-    if (destination === 'Unknown' && routeMatch) {
+    if (destination === 'Unknown' && routeMatch && routeMatch[2]) {
       destination = routeMatch[2].trim();
       destination = destination.split(/\s+from|\s+to|\s+on/)[0].trim();
+    }
+    
+    // Pattern 2: "activities from X to Y" or "search for activities from X to Y"
+    if ((departure === 'Unknown' || destination === 'Unknown') && messageContent && messageContent.toLowerCase().includes('activities')) {
+      const activitiesRouteMatch = messageContent.match(/(?:activities|search for activities)\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
+      if (activitiesRouteMatch && activitiesRouteMatch[1] && activitiesRouteMatch[2]) {
+        if (departure === 'Unknown') {
+          departure = activitiesRouteMatch[1].trim().replace(/\.$/, '').trim();
+        }
+        if (destination === 'Unknown') {
+          destination = activitiesRouteMatch[2].trim().split(/\s+from|\s+to|\s+on/)[0].trim();
+        }
+      }
     }
     
     // Pattern 2: "generate itinerary from X to Y"
     if (departure === 'Unknown' || destination === 'Unknown') {
       const generatePattern = messageContent.match(/(?:generate|create|make|plan|show)\s+itinerary\s+from\s+([^to]+?)\s+to\s+([^\n,]+?)(?:\s+from|\s+to|\s+on|\s+,\s|$)/i);
-      if (generatePattern) {
+      if (generatePattern && generatePattern[1] && generatePattern[2]) {
         if (departure === 'Unknown') {
           departure = generatePattern[1].trim().replace(/\.$/, '').trim();
         }
@@ -1420,60 +1824,110 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     
     // Extract dates more robustly from message if not in tripState
     if (!departureDate || !returnDate) {
-      const monthPattern = /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/gi;
-      const dateMatches = [];
-      let match;
-      while ((match = monthPattern.exec(messageContent)) !== null) {
-        dateMatches.push(match[0]);
+      // Pattern 1: "from November 20th to November 27th" or "November 20 to November 27"
+      const dateRangePattern = /(?:from\s+)?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+to\s+|\s+-\s+)(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/gi;
+      const dateRangeMatch = messageContent.match(dateRangePattern);
+      
+      if (dateRangeMatch) {
+        const fullMatch = dateRangeMatch[0];
+        const parts = fullMatch.split(/\s+to\s+|\s+-\s+/i);
+        if (parts.length >= 2) {
+          if (!departureDate) {
+            departureDate = parts[0].replace(/^from\s+/i, '').trim();
+          }
+          if (!returnDate) {
+            returnDate = parts[1].trim();
+          }
+        }
       }
       
-      if (!departureDate && dateMatches.length > 0) {
-        departureDate = dateMatches[0];
-      }
-      if (!returnDate && dateMatches.length > 1) {
-        returnDate = dateMatches[1];
+      // Pattern 2: Individual dates "November 20th" or "Nov 20"
+      if (!departureDate || !returnDate) {
+        const monthPattern = /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/gi;
+        const dateMatches = [];
+        let match;
+        while ((match = monthPattern.exec(messageContent)) !== null) {
+          dateMatches.push(match[0]);
+        }
+        
+        if (!departureDate && dateMatches.length > 0) {
+          departureDate = dateMatches[0];
+        }
+        if (!returnDate && dateMatches.length > 1) {
+          returnDate = dateMatches[1];
+        }
       }
     }
     
+    console.log('Extracted dates from message:', { departureDate, returnDate });
+    
     // Format dates to ISO format for TripState
+    // This function handles "November 20th", "Nov 20", "November 20", etc.
     const formatDateToISO = (dateStr) => {
       if (!dateStr) return null;
+      
+      // Already ISO format (YYYY-MM-DD)
+      if (typeof dateStr === 'string' && dateStr.match(/^\d{4}-\d{2}-\d{2}/)) {
+        return dateStr;
+      }
+      
       try {
-        const date = new Date(dateStr);
-        if (!isNaN(date.getTime())) {
-          return date.toISOString().split('T')[0];
-        }
-      } catch (e) {
-        // Fallback: try to parse month name format
+        // Try to parse month name format first (e.g., "November 20th", "Nov 20")
         const monthNames = {
           'january': 0, 'february': 1, 'march': 2, 'april': 3, 'may': 4, 'june': 5,
           'july': 6, 'august': 7, 'september': 8, 'october': 9, 'november': 10, 'december': 11,
           'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
           'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
         };
-        const dateMatch = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/i);
+        
+        // Pattern: "November 20th" or "Nov 20" or "November 20"
+        const dateMatch = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/i);
         if (dateMatch) {
-          const month = monthNames[dateMatch[1].toLowerCase()];
+          const monthName = dateMatch[1].toLowerCase();
+          const month = monthNames[monthName];
           const day = parseInt(dateMatch[2]);
-          const currentYear = new Date().getFullYear();
-          const date = new Date(currentYear, month, day);
-          // If date is in the past, use next year
-          if (date < new Date()) {
-            date.setFullYear(currentYear + 1);
+          
+          if (month !== undefined && !isNaN(day)) {
+            const currentYear = new Date().getFullYear();
+            const date = new Date(currentYear, month, day);
+            
+            // If date is in the past, use next year
+            if (date < new Date()) {
+              date.setFullYear(currentYear + 1);
+            }
+            
+            const isoDate = date.toISOString().split('T')[0];
+            console.log(`Converted "${dateStr}" to ISO: ${isoDate}`);
+            return isoDate;
           }
+        }
+        
+        // Fallback: try standard Date parsing
+        const date = new Date(dateStr);
+        if (!isNaN(date.getTime())) {
           return date.toISOString().split('T')[0];
         }
+      } catch (e) {
+        console.warn('Error formatting date to ISO:', dateStr, e);
       }
+      
       return null;
     };
+    
+    // Format dates for routeInfo (keep original format for display, but also ensure ISO format is available)
+    const formattedDepartureDate = departureDate ? formatDateToISO(departureDate) || departureDate : null;
+    const formattedReturnDate = returnDate ? formatDateToISO(returnDate) || returnDate : null;
     
     const routeInfo = {
       departure: departure || 'Unknown',
       destination: destination || 'Unknown',
       departureCode: departureCode || '',
       destinationCode: destinationCode || '',
-      date: departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      returnDate: returnDate || null
+      date: formattedDepartureDate || departureDate || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      returnDate: formattedReturnDate || returnDate || null,
+      // Also store ISO format dates for tripState
+      departureDateISO: formattedDepartureDate,
+      returnDateISO: formattedReturnDate
     };
     
     console.log('=== Final routeInfo ===');
@@ -1487,6 +1941,8 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         'washington dc': 'Washington DC',
         'washington': 'Washington DC',
         'dc': 'Washington DC',
+        'washington d.c.': 'Washington DC',
+        'washington d.c': 'Washington DC',
         'new york': 'New York',
         'nyc': 'New York',
         'los angeles': 'Los Angeles',
@@ -1495,21 +1951,51 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       normalizedDeparture = cityMappings[normalizedDeparture.toLowerCase()] || normalizedDeparture;
     }
     
-    if (normalizedDeparture && destination && normalizedDeparture !== 'Unknown' && destination !== 'Unknown') {
+    // Normalize destination city name
+    let normalizedDestination = destination;
+    if (normalizedDestination && normalizedDestination !== 'Unknown') {
+      const cityMappings = {
+        'barcelona': 'Barcelona',
+        'paris': 'Paris',
+        'london': 'London',
+        'tokyo': 'Tokyo'
+      };
+      normalizedDestination = cityMappings[normalizedDestination.toLowerCase()] || normalizedDestination;
+    }
+    
+    // Always try to save route info if we have at least destination (for activities search)
+    // Even if departure is Unknown, we can still search for activities in destination
+    if (normalizedDestination && normalizedDestination !== 'Unknown') {
       console.log('=== handleGenerateItinerary: Saving to tripState ===');
       console.log('normalizedDeparture:', normalizedDeparture);
-      console.log('destination:', destination);
+      console.log('normalizedDestination:', normalizedDestination);
+      // Ensure dates are in ISO format for tripState
+      const isoDepartureDate = formattedDepartureDate || formatDateToISO(departureDate) || formatDateToISO(routeInfo.date) || currentTripState?.startDate || null;
+      const isoReturnDate = formattedReturnDate || formatDateToISO(returnDate) || currentTripState?.endDate || null;
+      
+      console.log('Saving dates to tripState:', {
+        originalDepartureDate: departureDate,
+        isoDepartureDate: isoDepartureDate,
+        originalReturnDate: returnDate,
+        isoReturnDate: isoReturnDate
+      });
+      
       updateTripRoute({
-        departure: normalizedDeparture,
-        destination: destination,
-        departureCode: departureCode,
-        destinationCode: destinationCode,
-        date: formatDateToISO(departureDate) || formatDateToISO(routeInfo.date),
-        returnDate: formatDateToISO(returnDate)
+        departure: normalizedDeparture && normalizedDeparture !== 'Unknown' && normalizedDeparture.trim() !== '' 
+          ? normalizedDeparture 
+          : (currentTripState?.origin && currentTripState.origin.trim() !== '' ? currentTripState.origin : null),
+        destination: normalizedDestination,
+        departureCode: departureCode && departureCode.trim() !== '' 
+          ? departureCode 
+          : (currentTripState?.originCode && currentTripState.originCode && currentTripState.originCode.trim() !== '' ? currentTripState.originCode : null),
+        destinationCode: destinationCode || currentTripState?.destinationCode || '',
+        date: isoDepartureDate,
+        returnDate: isoReturnDate
       });
       console.log('Updated tripState in handleGenerateItinerary');
     } else {
-      console.warn('handleGenerateItinerary: Not updating tripState - missing departure or destination');
+      console.warn('handleGenerateItinerary: Not updating tripState - missing destination');
+      console.warn('departure:', departure, 'destination:', destination);
     }
     
     navigate('/itinerary', {
@@ -1727,25 +2213,52 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       }}>
         <header className="chat-header">
           <div className="container">
-            <div className="chat-header-content">
-              <button className="back-button" onClick={() => window.location.href = '/'}>
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                  <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-                Back to Home
-              </button>
-              <div className="chat-header-info">
-                <div className="chat-header-icon" style={{ width: '48px', height: '48px', padding: '6px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '36px', height: '36px' }} />
-                </div>
-                <div>
-                  <h1 className="chat-title">Miles</h1>
-                  <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
-                    Online • Let's personalize your experience
-                  </p>
+            <div className="chat-header-content" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flex: 1 }}>
+                <button className="back-button" onClick={() => window.location.href = '/'}>
+                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                    <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Back to Home
+                </button>
+                <div className="chat-header-info">
+                  <div className="chat-header-icon" style={{ width: '48px', height: '48px', padding: '6px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '36px', height: '36px' }} />
+                  </div>
+                  <div>
+                    <h1 className="chat-title">Miles</h1>
+                    <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
+                      Online • Let's personalize your experience
+                    </p>
+                  </div>
                 </div>
               </div>
+              <button
+                onClick={() => {
+                  handleStartNewTrip();
+                }}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: 'transparent',
+                  color: '#00ADEF',
+                  border: '2px solid #00ADEF',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  transition: 'all 0.2s',
+                  whiteSpace: 'nowrap'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.backgroundColor = '#E6F7FF';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.backgroundColor = 'transparent';
+                }}
+              >
+                New trip
+              </button>
             </div>
           </div>
         </header>
@@ -1760,25 +2273,56 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     <div className="chat-page">
       <header className="chat-header">
         <div className="container">
-          <div className="chat-header-content">
-            <button className="back-button" onClick={() => window.location.href = '/'}>
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              Back to Home
-            </button>
-            <div className="chat-header-info">
-              <div className="chat-header-icon" style={{ width: '48px', height: '48px', padding: '6px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '36px', height: '36px' }} />
-              </div>
-              <div>
-                <h1 className="chat-title">Miles</h1>
-                <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
-                  Online • Ready to help plan your trip
-                </p>
+          <div className="chat-header-content" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flex: 1 }}>
+              <button className="back-button" onClick={() => window.location.href = '/'}>
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Back to Home
+              </button>
+              <div className="chat-header-info">
+                <div className="chat-header-icon" style={{ width: '48px', height: '48px', padding: '6px', background: '#E6F7FF', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <img src={process.env.PUBLIC_URL + '/Miles_logo.png'} alt="Miles" style={{ width: '36px', height: '36px' }} />
+                </div>
+                <div>
+                  <h1 className="chat-title">Miles</h1>
+                  <p className="chat-status" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
+                    Online • Ready to help plan your trip
+                  </p>
+                </div>
               </div>
             </div>
+            <button
+              onClick={() => {
+                if (messages.length > 1 || showTripChoiceBanner) {
+                  setShowNewTripConfirm(true);
+                } else {
+                  handleStartNewTrip();
+                }
+              }}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: 'transparent',
+                color: '#00ADEF',
+                border: '2px solid #00ADEF',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: 600,
+                transition: 'all 0.2s',
+                whiteSpace: 'nowrap'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.backgroundColor = '#E6F7FF';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.backgroundColor = 'transparent';
+              }}
+            >
+              New trip
+            </button>
           </div>
         </div>
       </header>
@@ -1808,7 +2352,49 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
               </div>
               <button
                 onClick={() => {
-                  navigate('/itinerary');
+                  // Check tripState first
+                  const tripState = loadTripState();
+                  
+                  if (tripState?.optimizedItinerary) {
+                    // Itinerary exists in tripState, navigate directly
+                    console.log('Found optimized itinerary in tripState, navigating...');
+                    navigate('/itinerary');
+                    return;
+                  }
+                  
+                  // Try to load from localStorage
+                  const savedItinerary = loadOptimizedItinerary();
+                  if (savedItinerary?.optimizedItinerary) {
+                    // Restore to tripState
+                    console.log('Found saved itinerary in localStorage, restoring to tripState...');
+                    saveOptimizedItinerary(savedItinerary.optimizedItinerary);
+                    
+                    // Restore other related data if available
+                    if (savedItinerary.selectedOutboundFlight) {
+                      selectOutboundFlight(savedItinerary.selectedOutboundFlight);
+                    }
+                    if (savedItinerary.selectedReturnFlight) {
+                      selectReturnFlight(savedItinerary.selectedReturnFlight);
+                    }
+                    if (savedItinerary.selectedHotel) {
+                      selectHotel(savedItinerary.selectedHotel);
+                    }
+                    if (savedItinerary.mustDoActivities) {
+                      recordMustDoActivities(savedItinerary.mustDoActivities);
+                    }
+                    if (savedItinerary.preferenceWeights) {
+                      saveTripState({
+                        ...tripState,
+                        preferenceWeights: savedItinerary.preferenceWeights
+                      });
+                    }
+                    
+                    navigate('/itinerary');
+                    return;
+                  }
+                  
+                  // No itinerary found - show message
+                  alert('No saved itinerary found. Please generate a new itinerary from the flight or hotel search results.');
                 }}
                 style={{
                   padding: '10px 20px',
@@ -1863,6 +2449,73 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           <ChatInput onSend={handleSend} disabled={isTyping} />
         </div>
       </div>
+      
+      {/* Confirmation dialog for starting new trip */}
+      {showNewTripConfirm && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }} onClick={() => setShowNewTripConfirm(false)}>
+          <div style={{
+            backgroundColor: 'white',
+            padding: '24px',
+            borderRadius: '12px',
+            maxWidth: '400px',
+            width: '90%',
+            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+          }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '12px', color: '#004C8C' }}>
+              Start a new trip?
+            </h3>
+            <p style={{ fontSize: '14px', color: '#64748b', marginBottom: '20px' }}>
+              Your current chat will be cleared. This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowNewTripConfirm(false)}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: 'transparent',
+                  color: '#64748b',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: 600
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowNewTripConfirm(false);
+                  handleStartNewTrip();
+                }}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#00ADEF',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: 600
+                }}
+              >
+                Start New Trip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

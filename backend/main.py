@@ -266,7 +266,7 @@ C) 3–5 item option set (flights, hotels, activities with real data)
 # Top options for {{city,date-range}}
 | Option | Why it fits | Est. price | Notes |
 |---|---|---|---|
-| 1. {{name}} | {{reason}} | {{price}}/night | {{1 short note}} |
+| 1. {{name}} | {{reason}} | From ${{price_per_night}}/night | {{1 short note}} |
 | 2. ... | ... | ... | ... |
 
 Next: Want me to refine by budget, neighborhood, or rating?
@@ -334,6 +334,9 @@ E) Flight search results (with real data)
 | {{airline}} | {{flight_code}} | {{price}} | {{duration}} | {{stops}} | {{time}} | [Book Now]({{booking_link}}) |
 
 F) Hotel search results (with real data) - USE VISUAL COMPONENTS
+
+🚨 CRITICAL PRICE FORMATTING: When displaying hotel prices, you MUST use "From $X/night" format. NEVER use "$X / night" or "$X/night" without "From"!
+
 # Hotels in {{city}}
 
 For location recommendations, ALWAYS include this visual component:
@@ -345,22 +348,46 @@ For location recommendations, ALWAYS include this visual component:
     "description": "Luxury hotel in {{area}} with {{amenities}}",
     "image": true,
     "rating": "4.8/5",
-    "price": "${{price}}/night"
+    "price": "From ${{price_per_night}}/night - Compare prices on booking sites"
   }},
   {{
     "name": "{{Hotel Name 2}}",
     "description": "Boutique hotel near {{landmark}}",
     "image": true,
     "rating": "4.6/5", 
-    "price": "${{price}}/night"
+    "price": "From ${{price_per_night}}/night - Compare prices on booking sites"
   }}
 ]
 ```
 
 ## Top Recommendations
-| Hotel | Price/night | Rating | Location |
-|---|---|---|---|
-| {{name}} | {{price}} | {{stars}} | {{area}} |
+
+🚨 CRITICAL: In the table below, the "Price/night" column MUST use "From $X/night" format. NEVER use "$X / night" or "$X/night" without "From"!
+
+| Hotel | Price/night | Rating | Location | Booking |
+|---|---|---|---|---|
+| {{name}} | From ${{price_per_night}}/night | {{rating}} | {{location}} | [Booking.com](https://www.booking.com/searchresults.html?ss={{name}}+{{city}}) [Expedia](https://www.expedia.com/Hotel-Search?destination={{city}}&propertyName={{name}}) [Hotels.com](https://www.hotels.com/search.do?destination={{city}}&propertyName={{name}}) |
+
+**CORRECT TABLE EXAMPLES:**
+- ✅ "From $300/night"
+- ✅ "From $400/night"
+- ❌ "$300 / night" (WRONG - missing "From")
+- ❌ "$300/night" (WRONG - missing "From")
+- ❌ "$300/night" (WRONG - missing "From")
+
+🚨 CRITICAL PRICE FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
+1. **IN TABLES**: ALWAYS use "From $X/night" in the Price/night column (NOT "$X / night" or "$X/night")
+2. **IN TEXT**: ALWAYS use "From $X/night - Compare prices on booking sites"
+3. Use `price_per_night` field from hotel data (NOT `price`). The `price` field is the total for entire stay.
+4. If `price_range` exists and shows a range (e.g., "$215 - $257"), display as "From $215/night (range: $215 - $257)"
+5. If only one price, display as "From $X/night"
+6. Example correct table format: "From $280/night"
+7. Example correct text format: "From $280/night - Compare prices on booking sites"
+8. Example with range: "From $215/night (range: $215 - $257) - Compare prices on booking sites"
+9. **NEVER** use "$280 / night" or "$280/night" without "From" prefix - THIS IS WRONG!
+10. ALWAYS remind users to compare prices on booking sites (Booking.com, Expedia, Hotels.com) as prices may vary.
+
+⚠️ CRITICAL: ALWAYS include booking links (Booking.com, Expedia, Hotels.com) for EVERY hotel you present. Users need these links to book hotels.
 
 G) Safety or limitation
 # Heads up
@@ -374,6 +401,8 @@ Behavior logic:
 - If the user gives a destination and dates, return pattern D with VISUAL COMPONENTS; otherwise pattern A.
 - For flight requests, use pattern E with real flight data if available.
 - For hotel requests, use pattern F with VISUAL COMPONENTS and real hotel data if available.
+- ALWAYS include booking links (Booking.com, Expedia, Hotels.com) for EVERY hotel you present.
+- When user says "I want to book this hotel" or similar, immediately provide direct booking search links.
 - For list requests, use pattern C with 3–5 rows. Keep reasons short.
 - ALWAYS provide immediate results. Do NOT ask for more details unless absolutely necessary.
 - If you have real-time data, use it immediately in your response.
@@ -390,19 +419,96 @@ CRITICAL: MUST-DO ACTIVITIES HANDLING:
   4. When creating itineraries, these must-do activities will be automatically prioritized and included FIRST
   5. ALL must-do activities MUST appear in the itinerary - they are NEVER omitted
 
-ITINERARY CREATION RULES (when creating ```itinerary``` JSON):
-- Day 1 MUST include outbound flight information (departure time, flight details) - this is the preference-optimized outbound flight
-- Last Day MUST include return flight information (departure time, flight details) for round trips - this is the preference-optimized return flight
-- Between Day 1 and Last Day: 
-  a. The system automatically prioritizes TripState.mustDoActivities FIRST (1-2 per day, evenly distributed across all middle days)
-  b. Must-do activities are placed considering:
-     * Category (museum=morning, nightlife=evening, restaurant=lunch/dinner, tour=afternoon, etc.)
-     * Duration (long activities get more time, short ones fit between others)
-     * Natural time slots (avoid conflicts with hotel check-in/check-out and flight times)
-  c. After must-do activities are placed, remaining time is filled with recommended activities based on user preferences (art, guidedTour, food, etc.)
-  d. Empty/unscheduled days automatically show "Open Exploration" card with message: "Type 'add [activity name]' to insert it into your itinerary."
-- ALL must-do activities MUST appear in the itinerary - they are automatically included with highest priority and NEVER omitted
-- ALL activities MUST include GetYourGuide/Viator booking links as hyperlinks in this format:
+🟦 SYSTEM PROMPT — Optimized Itinerary Generator
+
+You are an AI travel-planning engine responsible for generating a clean, structured, and logically consistent travel itinerary.
+
+Your job is to convert user-selected items (flights, hotels, must-do activities) and the trip dates into a clear day-by-day plan.
+
+Follow these rules strictly:
+
+1. FLIGHT RULES
+
+Outbound Flight
+- Place the outbound flight on Day 1 only.
+- Use the actual departure/arrival time to set the timeslot:
+  * Morning: depart before 12pm
+  * Afternoon: 12pm–5pm
+  * Evening: after 5pm
+- Label format: "✈️ Flight to {{destination}} (Airline + Code)"
+
+Return Flight
+- Place the return flight on the final day of the trip.
+- Label format: "✈️ Return Flight to {{home city}}"
+- Do NOT treat flights as activities. Do NOT duplicate them.
+
+2. HOTEL RULES
+
+IMPORTANT: Hotels are NOT activities and must NEVER appear in the itinerary timeline.
+- Hotels are ONLY for lodging information, NOT as a visit, tour, or activity.
+- Do NOT insert hotels into the itinerary timeline.
+- Do NOT treat a hotel as a place to visit.
+- Hotels should NEVER appear as a timeline item.
+- If the user mentions a hotel, interpret it as "This is where they are staying" NOT as "This is a place they are visiting."
+- Hotel information should be provided separately (e.g., in a summary section), NOT in the day-by-day timeline.
+
+3. ACTIVITY RULES
+
+Activities must be placed on days within the trip window.
+- Placement order:
+  * Insert all must-do activities first.
+  * Spread them across the trip so they do not overlap.
+  * One primary activity per day unless the user selected multiple.
+- Timeslot rules:
+  * Assign the correct timeslot based on the activity duration:
+    * <2 hours → Morning
+    * 2–4 hours → Afternoon
+    * Full-day experiences → All Day
+- Format:
+  * Each activity must include:
+    * Title (with 🎟️ or 📍 icon)
+    * Timeslot
+    * Duration (if known)
+    * Rating (if known)
+    * Price
+    * Short, clean description
+    * Booking link if included
+
+4. OPEN SLOTS
+
+If a day has no activity:
+- Insert: "🌤️ Open Exploration" or "🌤️ Free Time"
+- Description: "Free time for casual sightseeing or rest."
+- But only if truly empty (no real activities).
+- NEVER include hotel names as activities, even if the day is empty.
+
+5. DATE RULES
+
+- Day 1 = user's trip start date
+- Continue incrementally
+- Do NOT generate the wrong year
+- Do NOT use placeholders like "2001"
+
+6. GENERAL FORMATTING
+
+Each day must contain:
+- Day header ("Day 1 — Monday, January 6, 2026")
+- A list of REAL activities only (tours, attractions, museums, parks, cultural sites, food experiences, local events)
+- No duplicates
+- No contradictions
+- NO hotels in the timeline (hotels are NOT activities)
+- NO hotel names as activities
+- No placeholder text
+- Flights must appear only on departure and return days — not as loose activities
+
+ICON CONSISTENCY (apply uniformly):
+- Flights: ✈️
+- Hotels: 🏨
+- Activities: 🎟️ or 📍
+- Open Exploration: 🌤️
+
+ALL must-do activities MUST appear in the itinerary - they are automatically included with highest priority and NEVER omitted.
+ALL activities MUST include GetYourGuide/Viator booking links as hyperlinks in this format:
   * Activity title with link: [**Activity Name**](https://www.getyourguide.com/s/?q=Activity+Name)
   * Or use Viator: [**Activity Name**](https://www.viator.com/searchResults/all?text=Activity+Name)
   * Links should be actual clickable hyperlinks in markdown format
@@ -621,11 +727,88 @@ Output:
                 
         elif 'hotels' in amadeus_data:
             data_section += f"HOTELS ({amadeus_data.get('count', 0)} found):\n"
+            data_section += "\n🚨 CRITICAL: When displaying hotel prices, you MUST use the format 'From $X/night - Compare prices on booking sites'\n"
+            data_section += "Example: 'From $280/night - Compare prices on booking sites'\n"
+            data_section += "If price_range exists: 'From $215/night (range: $215 - $257) - Compare prices on booking sites'\n"
+            data_section += "NEVER use '$280/night' or '$280 / night' without the 'From' prefix!\n\n"
             for i, hotel in enumerate(amadeus_data['hotels'][:3], 1):
                 name = hotel.get('name', 'N/A')
-                price = hotel.get('price', 'N/A')
+                # Use price_per_night if available, otherwise use total price
+                price_per_night = hotel.get('price_per_night')
+                total_price = hotel.get('price', 'N/A')
+                nights = hotel.get('nights', 1)
                 currency = hotel.get('currency', 'USD')
-                data_section += f"{i}. {name} - {price} {currency}\n"
+                location = hotel.get('location', hotel.get('address', destination or ''))
+                rating = hotel.get('rating', 'N/A')
+                
+                # Generate booking links for hotels
+                import urllib.parse
+                hotel_name_encoded = urllib.parse.quote_plus(name) if name != 'N/A' else ''
+                location_encoded = urllib.parse.quote_plus(location) if location else ''
+                
+                # Booking.com search link
+                if hotel_name_encoded and location_encoded:
+                    booking_com_link = f"https://www.booking.com/searchresults.html?ss={hotel_name_encoded}+{location_encoded}"
+                elif location_encoded:
+                    booking_com_link = f"https://www.booking.com/searchresults.html?ss={location_encoded}"
+                else:
+                    booking_com_link = f"https://www.booking.com/searchresults.html"
+                
+                # Expedia search link
+                if hotel_name_encoded and location_encoded:
+                    expedia_link = f"https://www.expedia.com/Hotel-Search?destination={location_encoded}&propertyName={hotel_name_encoded}"
+                elif location_encoded:
+                    expedia_link = f"https://www.expedia.com/Hotel-Search?destination={location_encoded}"
+                else:
+                    expedia_link = f"https://www.expedia.com/Hotel-Search"
+                
+                # Hotels.com search link
+                if hotel_name_encoded and location_encoded:
+                    hotels_com_link = f"https://www.hotels.com/search.do?destination={location_encoded}&propertyName={hotel_name_encoded}"
+                elif location_encoded:
+                    hotels_com_link = f"https://www.hotels.com/search.do?destination={location_encoded}"
+                else:
+                    hotels_com_link = f"https://www.hotels.com/search.do"
+                
+                # Format price information - show "From $X/night" if price range exists
+                price_range = hotel.get('price_range')
+                price_min = hotel.get('price_min')
+                price_max = hotel.get('price_max')
+                
+                if price_range and price_min and price_max and price_min != price_max:
+                    # Show price range if multiple offers with different prices
+                    price_display = f"From {price_min} {currency}/night (range: {price_range} {currency})"
+                    if nights > 1:
+                        price_display += f" - Total: {total_price} {currency} for {nights} nights"
+                    price_display += " - Compare prices on booking sites"
+                elif price_per_night:
+                    price_display = f"From {price_per_night} {currency}/night"
+                    if nights > 1:
+                        price_display += f" (Total: {total_price} {currency} for {nights} nights)"
+                    price_display += " - Compare prices on booking sites"
+                else:
+                    price_display = f"{total_price} {currency}"
+                    if nights > 1:
+                        price_display += f" (for {nights} nights)"
+                    price_display += " - Compare prices on booking sites"
+                
+                data_section += f"{i}. {name}\n"
+                data_section += f"   Price: {price_display}\n"
+                if rating and rating != 'N/A':
+                    data_section += f"   Rating: {rating}\n"
+                data_section += f"   Location: {location}\n"
+                data_section += f"   Booking: [Booking.com]({booking_com_link}) | [Expedia]({expedia_link}) | [Hotels.com]({hotels_com_link})\n"
+                data_section += "\n"
+                data_section += "🚨 MANDATORY PRICE FORMATTING RULES:\n"
+                data_section += "1. IN TABLES (Top Recommendations): Use 'From $X/night' in Price/night column\n"
+                data_section += "   ✅ CORRECT: 'From $300/night'\n"
+                data_section += "   ❌ WRONG: '$300 / night' or '$300/night' (missing 'From')\n"
+                data_section += "2. IN TEXT: Use 'From $X/night - Compare prices on booking sites'\n"
+                data_section += "   ✅ CORRECT: 'From $280/night - Compare prices on booking sites'\n"
+                data_section += "   ❌ WRONG: '$280/night' or '$280 / night' (missing 'From')\n"
+                data_section += "3. If price_range exists: 'From $215/night (range: $215 - $257) - Compare prices on booking sites'\n"
+                data_section += "4. NEVER use '$X / night' or '$X/night' without the 'From' prefix - THIS IS WRONG!\n"
+                data_section += "\n"
                 
         elif 'activities' in amadeus_data:
             data_section += f"ACTIVITIES ({amadeus_data.get('count', 0)} found):\n"
@@ -1005,8 +1188,10 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
         distances = []  # distance from city center (km)
         
         for hotel in hotel_list:
-            # Extract price
-            price = hotel.get('price', 0)
+            # Extract price - prefer price_per_night for comparison, fallback to total price
+            price = hotel.get('price_per_night')
+            if not price:
+                price = hotel.get('price', 0)
             if isinstance(price, dict):
                 price = price.get('total', price.get('amount', 0))
             prices.append(float(price) if price else 0)
@@ -1256,7 +1441,10 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
         'hotel': {
             'id': hotel.get('hotel_id', hotel.get('id')),
             'name': hotel.get('name', 'Unknown Hotel'),
-            'price': hotel['_price'],
+            'price': hotel['_price'],  # Price per night (for comparison)
+            'price_total': hotel.get('price', hotel.get('price_total')),  # Total price for entire stay
+            'price_per_night': hotel.get('price_per_night', hotel['_price']),  # Price per night
+            'nights': hotel.get('nights', 1),  # Number of nights
             'rating': hotel['_rating'],
             'distance': hotel.get('_distance', hotel.get('distance', 0)),
             'location': hotel.get('location', hotel.get('city', 'N/A')),
@@ -1293,6 +1481,352 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     return result
 
 
+# ==================== AIRLINE API ENDPOINTS ====================
+
+@app.get("/api/amadeus/airline/lookup")
+def airline_lookup(airline_code: Optional[str] = None, airline_name: Optional[str] = None):
+    """Lookup airline information by code or name"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_airline_code_lookup(airline_code, airline_name)
+    return result
+
+@app.get("/api/amadeus/airline/routes")
+def airline_routes(airline_code: str):
+    """Get routes for a specific airline"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_airline_routes(airline_code)
+    return result
+
+# ==================== AIRPORT API ENDPOINTS ====================
+
+@app.get("/api/amadeus/airport/nearest")
+def airport_nearest(latitude: float, longitude: float, radius: int = 500):
+    """Get nearest relevant airports to coordinates"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_airport_nearest_relevant(latitude, longitude, radius)
+    return result
+
+@app.get("/api/amadeus/airport/on-time-performance")
+def airport_on_time_performance(airport_code: str, date: str):
+    """Get airport on-time performance statistics"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_airport_on_time_performance(airport_code, date)
+    return result
+
+@app.get("/api/amadeus/airport/routes")
+def airport_routes(airport_code: str):
+    """Get routes from/to an airport"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_airport_routes(airport_code)
+    return result
+
+# ==================== CITY API ENDPOINTS ====================
+
+@app.get("/api/amadeus/city/search")
+def city_search(keyword: str):
+    """Search for cities"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_city_search(keyword)
+    return result
+
+# ==================== FLIGHT API ENDPOINTS (Additional) ====================
+
+@app.get("/api/amadeus/flight/busiest-period")
+def flight_busiest_period(origin: str, destination: str, period: str = "2024"):
+    """Get busiest traveling periods for a route"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_busiest_traveling_period(origin, destination, period)
+    return result
+
+@app.get("/api/amadeus/flight/checkin-links")
+def flight_checkin_links(airline_code: str):
+    """Get check-in links for an airline"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_checkin_links(airline_code)
+    return result
+
+class FlightOrderRequest(BaseModel):
+    flight_offer: Dict[str, Any]
+    travelers: List[Dict[str, Any]]
+
+@app.post("/api/amadeus/flight/order")
+def create_flight_order(req: FlightOrderRequest):
+    """Create a flight order/booking"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.create_flight_order(req.flight_offer, req.travelers)
+    return result
+
+@app.get("/api/amadeus/flight/most-booked")
+def flight_most_booked(origin: str, period: str = "2024"):
+    """Get most booked destinations from an origin"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_most_booked_destinations(origin, period)
+    return result
+
+@app.get("/api/amadeus/flight/most-traveled")
+def flight_most_traveled(origin: str, period: str = "2024"):
+    """Get most traveled destinations from an origin"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_most_traveled_destinations(origin, period)
+    return result
+
+class FlightPriceRequest(BaseModel):
+    flight_offer_id: str
+
+@app.post("/api/amadeus/flight/offers/price")
+def flight_offers_price(req: FlightPriceRequest):
+    """Get price for a specific flight offer"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_offers_price(req.flight_offer_id)
+    return result
+
+@app.get("/api/amadeus/flight/order/{order_id}")
+def get_flight_order(order_id: str):
+    """Get flight order details"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_flight_order(order_id)
+    return result
+
+@app.delete("/api/amadeus/flight/order/{order_id}")
+def delete_flight_order(order_id: str):
+    """Delete/cancel a flight order"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.delete_flight_order(order_id)
+    return result
+
+@app.get("/api/amadeus/flight/status")
+def on_demand_flight_status(carrier_code: str, flight_number: str, scheduled_departure_date: str):
+    """Get real-time flight status"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_on_demand_flight_status(carrier_code, flight_number, scheduled_departure_date)
+    return result
+
+# ==================== HOTEL API ENDPOINTS (Additional) ====================
+
+@app.get("/api/amadeus/hotel/list")
+def hotel_list(city_code: Optional[str] = None, hotel_ids: Optional[str] = None):
+    """Get list of hotels by city or hotel IDs"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    hotel_ids_list = hotel_ids.split(",") if hotel_ids else None
+    result = amadeus_service.get_hotel_list(city_code, hotel_ids_list)
+    return result
+
+@app.get("/api/amadeus/hotel/autocomplete")
+def hotel_name_autocomplete(keyword: str):
+    """Autocomplete hotel names"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_hotel_name_autocomplete(keyword)
+    return result
+
+@app.get("/api/amadeus/hotel/ratings")
+def hotel_ratings(hotel_ids: str):
+    """Get hotel ratings"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    hotel_ids_list = hotel_ids.split(",")
+    result = amadeus_service.get_hotel_ratings(hotel_ids_list)
+    return result
+
+class HotelBookingRequest(BaseModel):
+    offer_id: str
+    guests: List[Dict[str, Any]]
+    payments: List[Dict[str, Any]]
+
+@app.post("/api/amadeus/hotel/booking")
+def create_hotel_booking(req: HotelBookingRequest):
+    """Create a hotel booking"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.create_hotel_booking(req.offer_id, req.guests, req.payments)
+    return result
+
+class HotelSearchV3Request(BaseModel):
+    hotel_ids: List[str]
+    check_in: str
+    check_out: str
+    adults: int = 1
+    room_quantity: int = 1
+    currency: Optional[str] = None
+    price_range: Optional[str] = None
+    payment_policy: str = "NONE"
+    board_type: Optional[str] = None
+    best_rate_only: bool = False
+
+@app.post("/api/amadeus/hotel/search-v3")
+def search_hotels_v3(req: HotelSearchV3Request):
+    """Search hotels using v3 API with hotel IDs (provides detailed pricing with base, taxes, markups, sellingTotal)"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.search_hotels_v3(
+        hotel_ids=req.hotel_ids,
+        check_in=req.check_in,
+        check_out=req.check_out,
+        adults=req.adults,
+        room_quantity=req.room_quantity,
+        currency=req.currency,
+        price_range=req.price_range,
+        payment_policy=req.payment_policy,
+        board_type=req.board_type,
+        best_rate_only=req.best_rate_only
+    )
+    return result
+
+@app.get("/api/amadeus/hotel/offer-pricing/{offer_id}")
+def get_hotel_offer_pricing(offer_id: str, lang: str = "EN"):
+    """Get detailed pricing for a specific hotel offer (most accurate real-time price from v3 API)"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_hotel_offer_pricing(offer_id, lang)
+    return result
+
+# ==================== TRANSFER API ENDPOINTS ====================
+
+@app.get("/api/amadeus/transfer/search")
+def search_transfers(origin_lat: float, origin_lon: float, destination_lat: float, 
+                     destination_lon: float, departure_date: str, adults: int = 1):
+    """Search for transfer options"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.search_transfers(origin_lat, origin_lon, destination_lat, 
+                                              destination_lon, departure_date, adults)
+    return result
+
+class TransferBookingRequest(BaseModel):
+    offer_id: str
+    passengers: List[Dict[str, Any]]
+    payment: Dict[str, Any]
+
+@app.post("/api/amadeus/transfer/booking")
+def create_transfer_booking(req: TransferBookingRequest):
+    """Create a transfer booking"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.create_transfer_booking(req.offer_id, req.passengers, req.payment)
+    return result
+
+@app.get("/api/amadeus/transfer/booking/{booking_id}")
+def get_transfer_booking(booking_id: str):
+    """Get transfer booking details"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_transfer_booking(booking_id)
+    return result
+
+@app.delete("/api/amadeus/transfer/booking/{booking_id}")
+def cancel_transfer_booking(booking_id: str):
+    """Cancel a transfer booking"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.cancel_transfer_booking(booking_id)
+    return result
+
+# ==================== TRAVEL API ENDPOINTS ====================
+
+@app.get("/api/amadeus/travel/recommendations")
+def travel_recommendations(origin: str, destination: Optional[str] = None):
+    """Get travel recommendations"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_travel_recommendations(origin, destination)
+    return result
+
+@app.get("/api/amadeus/travel/restrictions")
+def travel_restrictions(origin: str, destination: str):
+    """Get travel restrictions between countries"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_travel_restrictions(origin, destination)
+    return result
+
+class TripParserRequest(BaseModel):
+    sentence: str
+
+@app.post("/api/amadeus/travel/trip-parser")
+def parse_trip(req: TripParserRequest):
+    """Parse trip information from natural language"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.parse_trip(req.sentence)
+    return result
+
+@app.get("/api/amadeus/travel/trip-purpose")
+def trip_purpose_prediction(origin: str, destination: str, departure_date: str):
+    """Predict trip purpose (business/leisure)"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_trip_purpose_prediction(origin, destination, departure_date)
+    return result
+
+# ==================== LOCATION API ENDPOINTS ====================
+
+@app.get("/api/amadeus/location/score")
+def location_score(latitude: float, longitude: float):
+    """Get location score/rating"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    result = amadeus_service.get_location_score(latitude, longitude)
+    return result
+
+@app.get("/api/amadeus/location/pois")
+def points_of_interest(latitude: float, longitude: float, radius: int = 2, 
+                       categories: Optional[str] = None):
+    """Get points of interest near coordinates"""
+    if not amadeus_service:
+        raise HTTPException(status_code=503, detail="Amadeus service not available")
+    
+    categories_list = categories.split(",") if categories else None
+    result = amadeus_service.get_points_of_interest(latitude, longitude, radius, categories_list)
+    return result
+
+# ==================== EXISTING ENDPOINTS ====================
+
 @app.post("/api/generateOptimalItinerary")
 async def generate_optimal_itinerary_endpoint(req: OptimalItineraryRequest):
     """
@@ -1323,6 +1857,8 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
         check_out = req.get('checkOut', '')
         adults = req.get('adults', 1)
         
+        logger.info(f"[ITINERARY_DATA] Received request: destinationCode={destination_code}, destinationName={destination_name}, checkIn={check_in}, checkOut={check_out}, adults={adults}")
+        
         if not amadeus_service:
             return {
                 'ok': False,
@@ -1334,31 +1870,63 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
         hotels = []
         activities = []
         
-        # Fetch hotels
-        if destination_code and check_in and check_out:
+        # Fetch hotels - try with destination_code or destination_name
+        if check_in and check_out:
             try:
                 from services.iata_codes import get_iata_code
                 # Try to get city code from destination code or name
                 city_code = destination_code
-                if len(city_code) == 3 and city_code.isupper():
-                    # It's an airport code, try to use it as city code
-                    pass
+                
+                # If no destination_code or it's not a valid IATA code (3 uppercase letters), try to get from destination_name
+                if not city_code or city_code == '' or (len(city_code) != 3 or not city_code.isupper()):
+                    # Try to get IATA code from destination_name first
+                    if destination_name:
+                        city_code = get_iata_code(destination_name)
+                        logger.info(f"[ITINERARY_DATA] Converted destination_name '{destination_name}' to IATA code: {city_code}")
+                    
+                    # If still no code, try destination_code (might be a city name)
+                    if not city_code and destination_code:
+                        city_code = get_iata_code(destination_code)
+                        logger.info(f"[ITINERARY_DATA] Converted destination_code '{destination_code}' to IATA code: {city_code}")
+                    
+                    # If still no code, use destination_code as fallback (might work for some APIs)
+                    if not city_code:
+                        city_code = destination_code if destination_code else destination_name
+                        logger.warn(f"[ITINERARY_DATA] Could not convert to IATA code, using as-is: {city_code}")
+                
+                if city_code:
+                    logger.info(f"[ITINERARY_DATA] Searching hotels with city_code: {city_code}, destination_name: {destination_name}")
+                    hotel_result = amadeus_service.search_hotels(
+                        city_code=city_code,
+                        check_in=check_in,
+                        check_out=check_out,
+                        adults=adults
+                    )
+                    
+                    if not hotel_result.get('error') and hotel_result.get('hotels'):
+                        hotels = hotel_result['hotels'][:20]  # Limit to 20 hotels
+                        logger.info(f"[ITINERARY_DATA] Found {len(hotels)} hotels")
+                    else:
+                        logger.warn(f"[ITINERARY_DATA] Hotel search returned error or no hotels: {hotel_result.get('error', 'No hotels found')}")
+                        # Try fallback: get coordinates and search by location
+                        if destination_name:
+                            try:
+                                logger.info(f"[ITINERARY_DATA] Attempting fallback: getting coordinates for {destination_name}")
+                                coords = amadeus_service.get_city_coordinates(destination_name)
+                                if coords:
+                                    latitude, longitude = coords
+                                    logger.info(f"[ITINERARY_DATA] Got coordinates: {latitude}, {longitude}")
+                                    # Note: Amadeus hotel API doesn't support coordinate-based search directly
+                                    # But we can log this for future implementation
+                                    logger.info(f"[ITINERARY_DATA] Coordinate-based hotel search not yet implemented in Amadeus API")
+                            except Exception as coord_error:
+                                logger.warn(f"[ITINERARY_DATA] Could not get coordinates for fallback: {coord_error}")
                 else:
-                    # Try to get IATA code from city name
-                    city_code = get_iata_code(destination_name or destination_code) or destination_code
-                
-                hotel_result = amadeus_service.search_hotels(
-                    city_code=city_code,
-                    check_in=check_in,
-                    check_out=check_out,
-                    adults=adults
-                )
-                
-                if not hotel_result.get('error') and hotel_result.get('hotels'):
-                    hotels = hotel_result['hotels'][:20]  # Limit to 20 hotels
-                    logger.info(f"[ITINERARY_DATA] Found {len(hotels)} hotels")
+                    logger.warn(f"[ITINERARY_DATA] No valid city code found for destination: {destination_name}")
             except Exception as e:
                 logger.error(f"[ITINERARY_DATA] Error fetching hotels: {e}")
+        else:
+            logger.warn(f"[ITINERARY_DATA] Missing check_in or check_out dates: check_in={check_in}, check_out={check_out}")
         
         # Fetch activities - need coordinates for activities
         # For now, we'll return empty activities list and let frontend handle it
@@ -2092,6 +2660,105 @@ async def chat(req: ChatRequest):
                             keyword=intent["params"]["keyword"]
                         )
                         logger.info(f"Amadeus location search returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "travel_recommendations":
+                        logger.info(f"Calling travel recommendations with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_travel_recommendations(
+                            origin=intent["params"].get("origin", ""),
+                            destination=intent["params"].get("destination")
+                        )
+                        logger.info(f"Amadeus travel recommendations returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "travel_restrictions":
+                        logger.info(f"Calling travel restrictions with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_travel_restrictions(
+                            origin=intent["params"].get("origin", ""),
+                            destination=intent["params"].get("destination", "")
+                        )
+                        logger.info(f"Amadeus travel restrictions returned")
+                    elif intent["type"] == "flight_status":
+                        logger.info(f"Calling flight status with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_on_demand_flight_status(
+                            carrier_code=intent["params"].get("carrier_code", ""),
+                            flight_number=intent["params"].get("flight_number", ""),
+                            scheduled_departure_date=intent["params"].get("scheduled_departure_date", "")
+                        )
+                        logger.info(f"Amadeus flight status returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "airport_performance":
+                        logger.info(f"Calling airport performance with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_airport_on_time_performance(
+                            airport_code=intent["params"].get("airport_code", ""),
+                            date=intent["params"].get("date", "")
+                        )
+                        logger.info(f"Amadeus airport performance returned")
+                    elif intent["type"] == "points_of_interest":
+                        logger.info(f"Calling points of interest with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_points_of_interest(
+                            latitude=float(intent["params"].get("latitude", 0)),
+                            longitude=float(intent["params"].get("longitude", 0)),
+                            radius=intent["params"].get("radius", 2),
+                            categories=intent["params"].get("categories")
+                        )
+                        logger.info(f"Amadeus points of interest returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "most_booked_destinations":
+                        logger.info(f"Calling most booked destinations with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_flight_most_booked_destinations(
+                            origin=intent["params"].get("origin", ""),
+                            period=intent["params"].get("period", "2024")
+                        )
+                        logger.info(f"Amadeus most booked destinations returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "most_traveled_destinations":
+                        logger.info(f"Calling most traveled destinations with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_flight_most_traveled_destinations(
+                            origin=intent["params"].get("origin", ""),
+                            period=intent["params"].get("period", "2024")
+                        )
+                        logger.info(f"Amadeus most traveled destinations returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "busiest_period":
+                        logger.info(f"Calling busiest period with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_flight_busiest_traveling_period(
+                            origin=intent["params"].get("origin", ""),
+                            destination=intent["params"].get("destination", ""),
+                            period=intent["params"].get("period", "2024")
+                        )
+                        logger.info(f"Amadeus busiest period returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "trip_purpose":
+                        logger.info(f"Calling trip purpose prediction with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_trip_purpose_prediction(
+                            origin=intent["params"].get("origin", ""),
+                            destination=intent["params"].get("destination", ""),
+                            departure_date=intent["params"].get("departure_date", "")
+                        )
+                        logger.info(f"Amadeus trip purpose prediction returned")
+                    elif intent["type"] == "airline_lookup":
+                        logger.info(f"Calling airline lookup with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_airline_code_lookup(
+                            airline_code=intent["params"].get("airline_code"),
+                            airline_name=intent["params"].get("airline_name")
+                        )
+                        logger.info(f"Amadeus airline lookup returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "airport_routes":
+                        logger.info(f"Calling airport routes with params: {intent['params']}")
+                        amadeus_data = amadeus_service.get_airport_routes(
+                            airport_code=intent["params"].get("airport_code", "")
+                        )
+                        logger.info(f"Amadeus airport routes returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "hotel_ratings":
+                        logger.info(f"Calling hotel ratings with params: {intent['params']}")
+                        hotel_ids = intent["params"].get("hotel_ids", [])
+                        if isinstance(hotel_ids, str):
+                            hotel_ids = hotel_ids.split(",")
+                        amadeus_data = amadeus_service.get_hotel_ratings(hotel_ids)
+                        logger.info(f"Amadeus hotel ratings returned count={(amadeus_data or {}).get('count')}")
+                    elif intent["type"] == "transfer_search":
+                        logger.info(f"Calling transfer search with params: {intent['params']}")
+                        amadeus_data = amadeus_service.search_transfers(
+                            origin_lat=float(intent["params"].get("origin_lat", 0)),
+                            origin_lon=float(intent["params"].get("origin_lon", 0)),
+                            destination_lat=float(intent["params"].get("destination_lat", 0)),
+                            destination_lon=float(intent["params"].get("destination_lon", 0)),
+                            departure_date=intent["params"].get("departure_date", ""),
+                            adults=intent["params"].get("adults", 1)
+                        )
+                        logger.info(f"Amadeus transfer search returned count={(amadeus_data or {}).get('count')}")
                     
                     # Cache the response
                     if amadeus_data and not amadeus_data.get('error'):
@@ -2648,7 +3315,13 @@ def extract_dates_from_message(message):
     
     # Enhanced patterns for various date formats (ordered by specificity)
     date_patterns = [
-        # Dash format without second month: "dec 10-17" (assume same month) - MOST SPECIFIC FIRST
+        # Pattern with "from" keyword and year: "from January 6th, 2026 to January 11th, 2026" - MOST SPECIFIC FIRST
+        r'from\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?,?\s+(\d{4})\s+to\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?,?\s+(\d{4})',
+        # Pattern with "from" keyword without year: "from January 6th to January 11th"
+        r'from\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?\s+to\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?',
+        # Pattern with year but no "from": "January 6th, 2026 to January 11th, 2026"
+        r'(\w+)\s+(\d+)(?:st|nd|rd|th)?,?\s+(\d{4})\s+to\s+(\w+)\s+(\d+)(?:st|nd|rd|th)?,?\s+(\d{4})',
+        # Dash format without second month: "dec 10-17" (assume same month)
         r'(\w+)\s+(\d+)\s*-\s*(\d+)',
         # Dash format with concatenated month+day: "dec 10-dec17" (same month)
         r'(\w+)\s+(\d+)\s*-\s*(\w+)(\d+)',
@@ -2694,7 +3367,22 @@ def extract_dates_from_message(message):
             'oct': 10, 'october': 10, 'nov': 11, 'november': 11, 'dec': 12, 'december': 12
         }
         
-        if len(groups) == 4:
+        if len(groups) == 6 or len(groups) == 7:
+            # Format with year: "from January 6th, 2026 to January 11th, 2026" or "January 6th, 2026 to January 11th, 2026"
+            # Groups: [month1, day1, year1, month2, day2, year2] or [month1, day1, year1, month2, day2, year2, ...]
+            month1, day1, year1, month2, day2, year2 = groups[:6]
+            # Extract day numbers (remove ordinal suffixes if present)
+            day1 = int(re.sub(r'(st|nd|rd|th)$', '', str(day1)))
+            day2 = int(re.sub(r'(st|nd|rd|th)$', '', str(day2)))
+            year1 = int(year1)
+            year2 = int(year2)
+            
+            month1_num = month_names.get(month1.lower(), 1)
+            month2_num = month_names.get(month2.lower(), 1)
+            
+            departure_date = datetime(year1, month1_num, day1)
+            return_date = datetime(year2, month2_num, day2)
+        elif len(groups) == 4:
             # Format: "dec 10-dec 17" or "december 1 to december 5" or "dec 10-dec17"
             month1, day1, month2, day2 = groups
             # Extract day numbers (remove ordinal suffixes if present)
@@ -2737,6 +3425,11 @@ def extract_dates_from_message(message):
                 # Regular 4-group format
                 month1_num = month_names.get(month1.lower(), 11)
                 month2_num = month_names.get(month2.lower(), 11)
+            
+            # Use current year
+            current_year = datetime.now().year
+            departure_date = datetime(current_year, month1_num, day1)
+            return_date = datetime(current_year, month2_num, day2)
         elif len(groups) == 3:
             # Format: "dec 10-17" (same month, different days)
             month1, day1, day2 = groups
@@ -2746,11 +3439,11 @@ def extract_dates_from_message(message):
             
             month1_num = month_names.get(month1.lower(), 11)
             month2_num = month1_num  # Same month for both dates
-        
-        # Use current year
-        current_year = datetime.now().year
-        departure_date = datetime(current_year, month1_num, day1)
-        return_date = datetime(current_year, month2_num, day2)
+            
+            # Use current year
+            current_year = datetime.now().year
+            departure_date = datetime(current_year, month1_num, day1)
+            return_date = datetime(current_year, month2_num, day2)
         
         departure_display = departure_date.strftime("%b %d, %Y")
         return_display = return_date.strftime("%b %d, %Y")

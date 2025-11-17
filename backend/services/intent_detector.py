@@ -131,6 +131,21 @@ IMPORTANT: If no specific date is mentioned, use reasonable defaults:
 - For hotel searches: use check-in 7 days from now, check-out 3 days later
 - For activities: use current date
 
+CRITICAL CONTEXT AWARENESS RULES:
+- ALWAYS check conversation history first - previous messages provide crucial context
+- If previous messages discuss activities, tours, attractions, or things to do → activity_search context
+- If previous messages discuss flights or travel routes → flight_search context  
+- If previous messages discuss hotels or accommodations → hotel_search context
+- When user says "guided tour", "tour", "activity", "things to do" AFTER discussing activities → activity_search
+- When user says "under $X", "below $X", "cheap", "budget" for tours/activities → activity_search with max_price
+- ONLY use flight_search if user explicitly mentions "flight", "fly", "airline", or route ("from X to Y")
+- Do NOT assume flight_search just because of words like "to", "from", "under" when context is clearly about activities
+- If user refines a previous search (e.g., "guided tour under $20" after activities list) → same intent as previous message
+- Examples:
+  * Previous: "activities in Barcelona" + Current: "guided tour under $20" → activity_search (NOT flight_search)
+  * Previous: "activities in Barcelona" + Current: "cheap options" → activity_search (NOT flight_search)
+  * Previous: "Top activities" + Current: "under $20" → activity_search (NOT flight_search)
+
 Return only the JSON object, no other text."""
 
             response = self.client.chat.completions.create(
