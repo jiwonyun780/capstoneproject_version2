@@ -5,7 +5,6 @@ const TripPreferencesForm = ({ onComplete }) => {
   const [quality, setQuality] = useState(3);
   const [convenience, setConvenience] = useState(3);
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
 
   const normalizeWeights = (budgetVal, qualityVal, convenienceVal) => {
@@ -20,53 +19,33 @@ const TripPreferencesForm = ({ onComplete }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    console.log('[TripPreferencesForm] Form submitted with values:', { budget, quality, convenience });
     setLoading(true);
     setError(null);
-    setResults(null);
 
     const weights = normalizeWeights(budget, quality, convenience);
+    console.log('[TripPreferencesForm] Normalized weights:', weights);
 
     try {
-      const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-      const base = isLocalhost 
-        ? 'http://localhost:8000'
-        : (process.env.REACT_APP_API_BASE || 'http://localhost:8000');
-
-      const response = await fetch(`${base}/api/optimizeTrip`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(weights),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Error response:', errorText);
-        throw new Error(`Server error: ${response.status} - ${errorText || 'Unknown error'}`);
-      }
-
-      const data = await response.json();
-      setResults(data);
-      
-      // Call onComplete callback with preferences
+      // Immediately save preferences and start chat - no need to call optimizeTrip API
+      // Trip optimization will happen later when user provides destination details
       if (onComplete) {
         const preferencesData = {
           preferences: weights,
           rawValues: { budget, quality, convenience }
         };
+        console.log('[TripPreferencesForm] Calling onComplete with:', preferencesData);
         onComplete(preferencesData);
+        console.log('[TripPreferencesForm] onComplete called successfully');
+      } else {
+        console.error('[TripPreferencesForm] ⚠️ onComplete is not defined!');
       }
     } catch (err) {
-      console.error('Error optimizing trip:', err);
-      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-        setError('Cannot connect to server. Please make sure the backend server is running on http://localhost:8000');
-      } else {
-        setError(err.message || 'Failed to generate trip recommendations. Please try again.');
-      }
-    } finally {
+      console.error('[TripPreferencesForm] Error saving preferences:', err);
+      setError(err.message || 'Failed to save preferences. Please try again.');
       setLoading(false);
     }
+    // Note: We don't set loading to false here because onComplete will navigate away
   };
 
   return (
@@ -85,7 +64,7 @@ const TripPreferencesForm = ({ onComplete }) => {
         marginBottom: '8px',
         textAlign: 'center'
       }}>
-        Tell us what matters most so we can personalize your trip.
+        Let’s plan a new trip! What matters most to you?
       </h2>
       <p style={{ 
         fontSize: '16px', 
@@ -311,7 +290,7 @@ const TripPreferencesForm = ({ onComplete }) => {
             if (!loading) e.target.style.background = '#00ADEF';
           }}
         >
-          {loading ? 'Generating Your Trip...' : 'Generate My Trip'}
+          {loading ? 'Starting...' : 'Continue to Chat'}
         </button>
 
         {error && (
@@ -327,85 +306,6 @@ const TripPreferencesForm = ({ onComplete }) => {
           </div>
         )}
       </form>
-
-      {/* Results Display */}
-      {results && results.options && results.options.length > 0 && (
-        <div style={{ marginTop: '32px' }}>
-          <h3 style={{ 
-            fontSize: '24px', 
-            fontWeight: 600, 
-            color: '#004C8C',
-            marginBottom: '24px',
-            textAlign: 'center'
-          }}>
-            Top Trip Recommendations
-          </h3>
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-            gap: '16px'
-          }}>
-            {results.options.map((option, index) => (
-              <div
-                key={index}
-                style={{
-                  padding: '20px',
-                  background: '#ffffff',
-                  border: '2px solid #EAF9FF',
-                  borderRadius: '12px',
-                  boxShadow: '0 2px 4px rgba(0, 0, 0, 0.05)',
-                }}
-              >
-                <div style={{ 
-                  fontSize: '14px', 
-                  fontWeight: 600, 
-                  color: '#00ADEF',
-                  marginBottom: '8px'
-                }}>
-                  #{index + 1} Recommendation
-                </div>
-                <h4 style={{ 
-                  fontSize: '20px', 
-                  fontWeight: 600, 
-                  color: '#004C8C',
-                  marginBottom: '16px'
-                }}>
-                  {option.destination}
-                </h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748b', fontSize: '14px' }}>Price:</span>
-                    <span style={{ color: '#004C8C', fontWeight: 600 }}>${option.price.toFixed(2)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748b', fontSize: '14px' }}>Rating:</span>
-                    <span style={{ color: '#004C8C', fontWeight: 600 }}>
-                      {'★'.repeat(Math.round(option.rating))}
-                      {'☆'.repeat(5 - Math.round(option.rating))} {option.rating.toFixed(1)}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#64748b', fontSize: '14px' }}>Travel Time:</span>
-                    <span style={{ color: '#004C8C', fontWeight: 600 }}>{option.travelTime}h</span>
-                  </div>
-                  <div style={{ 
-                    marginTop: '12px',
-                    padding: '8px',
-                    background: '#EAF9FF',
-                    borderRadius: '6px',
-                    fontSize: '12px',
-                    color: '#004C8C',
-                    textAlign: 'center',
-                    fontWeight: 500
-                  }}>
-                    Score: {option.score.toFixed(3)}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 };

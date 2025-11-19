@@ -104,31 +104,40 @@ const prepareBarChartData = (selectedFlight, alternativeFlights) => {
   const defaultCurrency = flightData.length > 0 ? (flightData[0].currency || 'EUR') : 'EUR';
   const currencySymbol = defaultCurrency === 'EUR' ? '€' : defaultCurrency === 'USD' ? '$' : defaultCurrency;
   
-  // Transform to recharts format: each metric is a data point
-  // Show actual values (not normalized) for better readability
-  const metrics = [
-    { key: 'actualPrice', label: 'Cost (USD)', format: (val) => `${currencySymbol}${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
-    { key: 'actualDurationHours', label: 'Duration (hours)', format: (val) => {
-      const hours = Math.floor(val);
-      const minutes = Math.round((val - hours) * 60);
-      return hours > 0 && minutes > 0 ? `${hours}h ${minutes}m` : hours > 0 ? `${hours}h` : `${minutes}m`;
-    }},
-    { key: 'actualStops', label: 'Stops', format: (val) => val === 0 ? 'Non-stop' : `${val} stop${val > 1 ? 's' : ''}` },
-    { key: 'actualConvenience', label: 'Convenience score', format: (val) => `${Math.round(val * 100)}%` }
-  ];
+  // Helper to get short flight label (defined before prepareBarChartData uses it)
+  const getShortFlightLabelForChart = (flight) => {
+    const airline = getShortAirlineName(flight.airline);
+    const flightNumber = flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || '';
+    return `${airline} ${flightNumber}`.trim();
+  };
   
-  const barData = metrics.map(metric => {
-    const dataPoint = { metric: metric.label };
-    flightData.forEach((flight) => {
-      const value = flight[metric.key];
-      dataPoint[flight.id] = value;
-      dataPoint[`${flight.id}_formatted`] = metric.format(value);
-      dataPoint[`${flight.id}_label`] = flight.fullName; // Store label for tooltip
-    });
-    return dataPoint;
-  });
+  // Get flight labels for chart series names
+  const flightALabel = getShortFlightLabelForChart(flightData[0]);
+  const flightBLabel = flightData.length > 1 ? getShortFlightLabelForChart(flightData[1]) : 'Flight B';
   
-  return { barData, flightData };
+  // Transform to recharts format: separate charts for Cost and Duration
+  // Simplified data structure - only metric and values, no custom tooltip columns
+  // Cost chart data - format for horizontal bar chart (one data point with both flights)
+  const costChartData = [{
+    metric: 'Cost (USD)',
+    'Flight A': flightData[0].actualPrice
+  }];
+  
+  if (flightData.length > 1) {
+    costChartData[0]['Flight B'] = flightData[1].actualPrice;
+  }
+  
+  // Duration chart data - format for horizontal bar chart (one data point with both flights)
+  const durationChartData = [{
+    metric: 'Duration (hours)',
+    'Flight A': flightData[0].actualDurationHours
+  }];
+  
+  if (flightData.length > 1) {
+    durationChartData[0]['Flight B'] = flightData[1].actualDurationHours;
+  }
+  
+  return { costChartData, durationChartData, flightData, flightALabel, flightBLabel };
 };
 
 // Helper to get short airline name (e.g., "KLM" from "KLM Royal Dutch Airlines")
@@ -221,46 +230,31 @@ const calculateSummary = (flightData) => {
     text: `${fasterLabel} is ${durationDiff} faster (${faster.actualDuration} vs ${slower.actualDuration}).`
   });
   
-  // Find best overall value (balance of cost and convenience)
-  const calculateValueScore = (flight) => {
-    const maxPrice = Math.max(flight1.actualPrice, flight2.actualPrice);
-    const priceScore = 1 - (flight.actualPrice / maxPrice);
-    const convenienceScore = flight.actualConvenience;
-    return (priceScore * 0.6) + (convenienceScore * 0.4);
-  };
+  // Determine recommended flight based on price and duration
+  const isCheaper = cheaper === flight1;
+  const isFaster = faster === flight1;
   
-  const score1 = calculateValueScore(flight1);
-  const score2 = calculateValueScore(flight2);
-  const bestValue = score1 > score2 ? flight1 : flight2;
-  const bestLabel = score1 > score2 ? label1 : label2;
-  
-  // Determine why it's better
-  const isCheaper = bestValue.actualPrice < (score1 > score2 ? flight2.actualPrice : flight1.actualPrice);
-  const isFaster = bestValue.actualDurationHours < (score1 > score2 ? flight2.actualDurationHours : flight1.actualDurationHours);
-  const sameStops = bestValue.actualStops === (score1 > score2 ? flight2.actualStops : flight1.actualStops);
-  
-  let reason = '';
+  // Recommend based on which flight is cheaper or faster
+  let recommendedFlight, recommendedLabel, reason;
   if (isCheaper && isFaster) {
-    reason = 'Lower cost and much shorter travel time';
+    recommendedFlight = flight1;
+    recommendedLabel = label1;
+    reason = 'Lower cost and shorter travel time';
+  } else if (!isCheaper && !isFaster) {
+    recommendedFlight = flight2;
+    recommendedLabel = label2;
+    reason = 'Lower cost and shorter travel time';
   } else if (isCheaper) {
+    recommendedFlight = flight1;
+    recommendedLabel = label1;
     reason = 'Lower cost';
-  } else if (isFaster) {
-    reason = 'Much shorter travel time';
   } else {
-    reason = 'Better overall value';
-  }
-  if (sameStops && (isCheaper || isFaster)) {
-    reason += ' with the same number of stops';
+    recommendedFlight = flight2;
+    recommendedLabel = label2;
+    reason = 'Lower cost';
   }
   
-  insights.push({
-    type: 'overall',
-    icon: '✅',
-    label: 'Overall',
-    text: `${bestLabel} offers better value for most travelers.`
-  });
-  
-  return { insights, recommendedFlight: bestValue, recommendedLabel: bestLabel, reason };
+  return { insights, recommendedFlight, recommendedLabel, reason };
 };
 
 // Custom tooltip for bar chart
@@ -274,7 +268,7 @@ const CustomTooltip = ({ active, payload, label }) => {
         borderRadius: '8px',
         boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
       }}>
-        <p style={{ margin: '0 0 8px 0', fontWeight: '600', color: '#004C8C' }}>
+        <p style={{ margin: '0 0 8px 0', fontWeight: '600', color: '#2D6CDF' }}>
           {label}
         </p>
         {payload.map((entry, index) => {
@@ -299,13 +293,13 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClose }) {
-  const { barData, flightData, summary } = useMemo(() => {
+  const { costChartData, durationChartData, flightData, summary, flightALabel, flightBLabel } = useMemo(() => {
     console.log('ComparisonModal - selectedFlight:', selectedFlight);
     console.log('ComparisonModal - alternativeFlights:', alternativeFlights);
     
     if (!selectedFlight) {
       console.log('No selectedFlight');
-      return { barData: null, flightData: null, summary: null };
+      return { costChartData: null, durationChartData: null, flightData: null, summary: null, flightALabel: null, flightBLabel: null };
     }
     
     // Can compare even with just the selected flight (no alternatives needed)
@@ -316,7 +310,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
     return { ...result, summary: summaryResult };
   }, [selectedFlight, alternativeFlights]);
   
-  console.log('ComparisonModal render - barData:', barData, 'flightData:', flightData);
+  console.log('ComparisonModal render - costChartData:', costChartData, 'durationChartData:', durationChartData, 'flightData:', flightData);
   
   if (!selectedFlight) {
     console.log('ComparisonModal - No selectedFlight, returning null');
@@ -324,7 +318,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
   }
   
   // Show at least the selected flight
-  if (!barData || !flightData || barData.length === 0 || flightData.length === 0) {
+  if (!costChartData || !durationChartData || !flightData || flightData.length === 0) {
     console.log('ComparisonModal - Invalid data, creating fallback');
     return (
       <div
@@ -377,8 +371,8 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
     );
   }
   
-  // Use consistent colors for exactly 2 flights
-  const colors = ['#00ADEF', '#FF6B6B'];
+  // Use consistent colors for exactly 2 flights - Miles UI color palette
+  const colors = ['#4A90E2', '#FF8A80']; // PrimaryBlue, SoftRed
   
   // Get short labels for flights
   const getFlightLabels = () => {
@@ -473,7 +467,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           marginBottom: '8px',
           fontSize: '24px',
           fontWeight: '700',
-          color: '#004C8C'
+          color: '#2D6CDF'
         }}>
           {title}
         </h2>
@@ -483,7 +477,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           <p style={{ 
             marginTop: 0, 
             marginBottom: '16px',
-            color: '#64748b',
+            color: '#4A4A4A',
             fontSize: '14px',
             fontWeight: '500'
           }}>
@@ -529,16 +523,16 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           <div style={{
             marginBottom: '32px',
             padding: '20px',
-            backgroundColor: '#f8fafc',
+            backgroundColor: '#F7F9FB',
             borderRadius: '8px',
-            border: '1px solid #e2e8f0'
+            border: '1px solid #DADDE2'
           }}>
             <h3 style={{
               marginTop: 0,
               marginBottom: '16px',
               fontSize: '18px',
               fontWeight: '600',
-              color: '#004C8C'
+              color: '#2D6CDF'
             }}>
               Quick Insights
             </h3>
@@ -556,8 +550,8 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                 }}>
                   <span style={{ fontSize: '18px', lineHeight: '1.2', flexShrink: 0 }}>{insight.icon}</span>
                   <div>
-                    <strong style={{ color: '#1e293b', marginRight: '6px' }}>{insight.label}</strong>
-                    <span style={{ color: '#475569' }}>– {insight.text}</span>
+                    <strong style={{ color: '#4A4A4A', marginRight: '6px' }}>{insight.label}</strong>
+                    <span style={{ color: '#4A4A4A', opacity: 0.8 }}>– {insight.text}</span>
                   </div>
                 </div>
               ))}
@@ -565,47 +559,123 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
           </div>
         )}
         
-        {/* Bar Chart */}
+        {/* Cost Comparison Bar Chart */}
         <div style={{ marginBottom: '32px', marginLeft: 'auto', marginRight: 'auto', maxWidth: '800px' }}>
-          <ResponsiveContainer width="100%" height={400}>
+          <h3 style={{ 
+            marginBottom: '16px',
+            fontSize: '18px',
+            fontWeight: '600',
+            color: '#2D6CDF',
+            textAlign: 'center'
+          }}>
+            Cost Comparison (USD)
+          </h3>
+          <ResponsiveContainer width="100%" height={300}>
             <BarChart
-              data={barData}
+              data={costChartData}
               layout="vertical"
-              margin={{ top: 20, right: 30, left: 140, bottom: 20 }}
+              margin={{ top: 20, right: 30, left: 100, bottom: 20 }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#DADDE2" />
               <XAxis 
                 type="number" 
-                tick={{ fill: '#64748b', fontSize: 11 }}
+                tick={{ fill: '#4A4A4A', fontSize: 11 }}
+                domain={[0, 'dataMax']}
               />
               <YAxis 
                 type="category" 
                 dataKey="metric" 
-                tick={{ fill: '#64748b', fontSize: 12 }}
+                tick={{ fill: '#4A4A4A', fontSize: 12 }}
                 width={140}
               />
-              <Tooltip content={<CustomTooltip />} />
+              <Tooltip 
+                shared={false}
+                formatter={(value, name) => {
+                  // Format the value with currency symbol
+                  const priceSymbol = flightData[0]?.currency === 'EUR' ? '€' : flightData[0]?.currency === 'USD' ? '$' : '$';
+                  return `${priceSymbol}${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                }}
+              />
               <Legend 
                 wrapperStyle={{ paddingTop: '20px' }}
                 iconType="square"
               />
-              {flightData.map((flight, index) => (
+              <Bar
+                dataKey="Flight A"
+                name={flightALabel || 'Flight A'}
+                fill={colors[0]}
+                radius={[0, 4, 4, 0]}
+              />
+              {flightData.length > 1 && (
                 <Bar
-                  key={flight.id}
-                  dataKey={flight.id}
-                  name={flight.fullName}
-                  fill={colors[index % colors.length]}
+                  dataKey="Flight B"
+                  name={flightBLabel || 'Flight B'}
+                  fill={colors[1]}
                   radius={[0, 4, 4, 0]}
-                >
-                  {barData.map((entry, idx) => (
-                    <Cell key={`cell-${idx}`} fill={colors[index % colors.length]} />
-                  ))}
-                </Bar>
-              ))}
+                />
+              )}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        
+        {/* Duration Comparison Bar Chart */}
+        <div style={{ marginBottom: '32px', marginLeft: 'auto', marginRight: 'auto', maxWidth: '800px' }}>
+          <h3 style={{ 
+            marginBottom: '16px',
+            fontSize: '18px',
+            fontWeight: '600',
+            color: '#2D6CDF',
+            textAlign: 'center'
+          }}>
+            Duration Comparison (hours)
+          </h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart
+              data={durationChartData}
+              layout="vertical"
+              margin={{ top: 20, right: 30, left: 100, bottom: 20 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#DADDE2" />
+              <XAxis 
+                type="number" 
+                tick={{ fill: '#4A4A4A', fontSize: 11 }}
+                domain={[0, 'dataMax']}
+              />
+              <YAxis 
+                type="category" 
+                dataKey="metric" 
+                tick={{ fill: '#4A4A4A', fontSize: 12 }}
+                width={140}
+              />
+              <Tooltip 
+                shared={false}
+                formatter={(value, name) => {
+                  // Format duration value (hours with 2 decimal places)
+                  return typeof value === 'number' ? `${value.toFixed(2)}h` : value;
+                }}
+              />
+              <Legend 
+                wrapperStyle={{ paddingTop: '20px' }}
+                iconType="square"
+              />
+              <Bar
+                dataKey="Flight A"
+                name={flightALabel || 'Flight A'}
+                fill={colors[0]}
+                radius={[0, 4, 4, 0]}
+              />
+              {flightData.length > 1 && (
+                <Bar
+                  dataKey="Flight B"
+                  name={flightBLabel || 'Flight B'}
+                  fill={colors[1]}
+                  radius={[0, 4, 4, 0]}
+                />
+              )}
             </BarChart>
           </ResponsiveContainer>
           
-          {/* Flight labels below chart */}
+          {/* Flight labels below charts */}
           <div style={{ 
             marginTop: '16px', 
             display: 'flex', 
@@ -630,7 +700,7 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
                   }}></div>
                   <div>
                     <div style={{ fontWeight: '600' }}>{getShortFlightLabel(flight)}</div>
-                    <div style={{ marginTop: '2px', fontSize: '11px', color: '#64748b' }}>
+                    <div style={{ marginTop: '2px', fontSize: '11px', color: '#4A4A4A' }}>
                       {priceSymbol}{Math.round(flight.actualPrice).toLocaleString('en-US')} • {flight.actualDuration} • {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
                     </div>
                   </div>
@@ -643,151 +713,239 @@ export function ComparisonModal({ selectedFlight, alternativeFlights = [], onClo
         {/* Detailed Comparison Table */}
         <div style={{ marginTop: '32px' }}>
           <h3 style={{ 
-            marginBottom: '16px',
+            marginBottom: '12px',
             fontSize: '18px',
             fontWeight: '600',
-            color: '#004C8C'
+            color: '#2D6CDF'
           }}>
             Detailed Comparison
           </h3>
           <div style={{ 
             maxHeight: '400px', 
             overflowY: 'auto',
-            border: '1px solid #e2e8f0',
-            borderRadius: '8px'
+            overflowX: 'auto',
+            border: '1px solid #DADDE2',
+            borderRadius: '8px',
+            backgroundColor: '#F7F9FB'
           }}>
             <table style={{ 
               width: '100%', 
               borderCollapse: 'collapse',
-              fontSize: '14px'
+              fontSize: '14px',
+              minWidth: '400px'
             }}>
-              <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f8fafc', zIndex: 10 }}>
+              <thead style={{ position: 'sticky', top: 0, backgroundColor: '#F7F9FB', zIndex: 10 }}>
                 <tr style={{ 
-                  borderBottom: '2px solid #e2e8f0'
+                  borderBottom: '2px solid #DADDE2'
                 }}>
                   <th style={{ 
-                    padding: '12px', 
+                    padding: '8px 12px', 
                     textAlign: 'left',
                     fontWeight: '600',
-                    color: '#004C8C',
-                    minWidth: '120px',
-                    width: '25%'
+                    color: '#2D6CDF',
+                    width: '30%'
                   }}>Item</th>
                   {flightData.map((flight, idx) => (
                     <th key={flight.id} style={{ 
-                      padding: '12px', 
+                      padding: '8px 12px', 
                       textAlign: 'center',
                       fontWeight: '600',
                       color: colors[idx],
-                      minWidth: '150px',
-                      width: `${75 / flightData.length}%`
+                      width: '35%'
                     }}>
                       {getShortFlightLabel(flight)}
                     </th>
                   ))}
-                  {flightData.length === 2 && (
-                    <th style={{ 
-                      padding: '12px', 
-                      textAlign: 'center',
-                      fontWeight: '600',
-                      color: '#004C8C',
-                      minWidth: '100px',
-                      width: '15%'
-                    }}>
-                      Better Option
-                    </th>
-                  )}
                 </tr>
               </thead>
               <tbody>
-                <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
-                  <td style={{ padding: '12px', fontWeight: '500' }}>Price</td>
+                {/* Price Row */}
+                <tr style={{ borderBottom: '1px solid #DADDE2', backgroundColor: '#ffffff' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}>
+                  <td style={{ padding: '8px 12px', fontWeight: '500', color: '#4A4A4A' }}>Price</td>
                   {flightData.map((flight, idx) => {
                     const priceSymbol = flight.currency === 'EUR' ? '€' : flight.currency === 'USD' ? '$' : flight.currency || '€';
                     const isBetter = flightData.length === 2 && idx === (flightData[0].actualPrice < flightData[1].actualPrice ? 0 : 1);
                     return (
-                      <React.Fragment key={flight.id}>
-                        <td style={{ padding: '12px', textAlign: 'center' }}>
-                          <span style={{ fontWeight: '700', color: '#059669' }}>
+                      <td key={flight.id} style={{ padding: '8px 12px', textAlign: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: '700', color: '#4A4A4A' }}>
                             {priceSymbol}{Math.round(flight.actualPrice).toLocaleString('en-US')}
                           </span>
-                        </td>
-                        {flightData.length === 2 && (
-                          <td style={{ padding: '12px', textAlign: 'center' }}>
-                            {isBetter ? '✅' : '–'}
-                          </td>
-                        )}
-                      </React.Fragment>
+                          {isBetter && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#3CB878',
+                              fontWeight: '600',
+                              backgroundColor: '#E9F8F1',
+                              padding: '2px 8px',
+                              borderRadius: '12px',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              ✓ Best
+                            </span>
+                          )}
+                        </div>
+                      </td>
                     );
                   })}
                 </tr>
-                <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#f8fafc' }}>
-                  <td style={{ padding: '12px', fontWeight: '500' }}>Duration</td>
+                {/* Duration Row */}
+                <tr style={{ borderBottom: '1px solid #DADDE2', backgroundColor: '#F7F9FB' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}>
+                  <td style={{ padding: '8px 12px', fontWeight: '500', color: '#4A4A4A' }}>Duration</td>
                   {flightData.map((flight, idx) => {
                     const isBetter = flightData.length === 2 && idx === (flightData[0].actualDurationHours < flightData[1].actualDurationHours ? 0 : 1);
                     return (
-                      <React.Fragment key={flight.id}>
-                        <td style={{ padding: '12px', textAlign: 'center' }}>
-                          <span style={{ fontWeight: '700', color: '#1e293b' }}>
-                            {flight.actualDuration}
+                      <td key={flight.id} style={{ padding: '8px 12px', textAlign: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: '700', color: '#4A4A4A' }}>
+                            {flight.actualDuration || '—'}
                           </span>
-                        </td>
-                        {flightData.length === 2 && (
-                          <td style={{ padding: '12px', textAlign: 'center' }}>
-                            {isBetter ? '✅' : '–'}
-                          </td>
-                        )}
-                      </React.Fragment>
+                          {isBetter && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#3CB878',
+                              fontWeight: '600',
+                              backgroundColor: '#E9F8F1',
+                              padding: '2px 8px',
+                              borderRadius: '12px',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              ✓ Best
+                            </span>
+                          )}
+                        </div>
+                      </td>
                     );
                   })}
                 </tr>
-                <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
-                  <td style={{ padding: '12px', fontWeight: '500' }}>Stops</td>
+                {/* Stops Row */}
+                <tr style={{ borderBottom: '1px solid #DADDE2', backgroundColor: '#ffffff' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}>
+                  <td style={{ padding: '8px 12px', fontWeight: '500', color: '#4A4A4A' }}>Stops</td>
                   {flightData.map((flight, idx) => {
                     const isBetter = flightData.length === 2 && idx === (flightData[0].actualStops < flightData[1].actualStops ? 0 : 1);
+                    const stopsText = flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`;
                     return (
-                      <React.Fragment key={flight.id}>
-                        <td style={{ padding: '12px', textAlign: 'center' }}>
-                          {flight.actualStops === 0 ? 'Non-stop' : `${flight.actualStops} stop${flight.actualStops > 1 ? 's' : ''}`}
-                        </td>
-                        {flightData.length === 2 && (
-                          <td style={{ padding: '12px', textAlign: 'center' }}>
-                            {isBetter ? '✅' : '–'}
-                          </td>
-                        )}
-                      </React.Fragment>
+                      <td key={flight.id} style={{ padding: '8px 12px', textAlign: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: '400', color: '#4A4A4A' }}>
+                            {stopsText || '—'}
+                          </span>
+                          {isBetter && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#3CB878',
+                              fontWeight: '600',
+                              backgroundColor: '#E9F8F1',
+                              padding: '2px 8px',
+                              borderRadius: '12px',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              ✓ Best
+                            </span>
+                          )}
+                        </div>
+                      </td>
                     );
                   })}
                 </tr>
-                <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#f8fafc' }}>
-                  <td style={{ padding: '12px', fontWeight: '500' }}>Airline</td>
-                  {flightData.map((flight, idx) => (
-                    <React.Fragment key={flight.id}>
-                      <td style={{ padding: '12px', textAlign: 'center' }}>
-                        {getShortAirlineName(flight.airline)}
-                      </td>
-                      {flightData.length === 2 && (
-                        <td style={{ padding: '12px', textAlign: 'center' }}>–</td>
-                      )}
-                    </React.Fragment>
+                {/* Airline Row */}
+                <tr style={{ borderBottom: '1px solid #DADDE2', backgroundColor: '#F7F9FB' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}>
+                  <td style={{ padding: '8px 12px', fontWeight: '500', color: '#4A4A4A' }}>Airline</td>
+                  {flightData.map((flight) => (
+                    <td key={flight.id} style={{ padding: '8px 12px', textAlign: 'center' }}>
+                      <span style={{ fontWeight: '400', color: '#4A4A4A', fontSize: '13px', opacity: 0.7 }}>
+                        {getShortAirlineName(flight.airline) || '—'}
+                      </span>
+                    </td>
                   ))}
                 </tr>
-                <tr style={{ borderBottom: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
-                  <td style={{ padding: '12px', fontWeight: '500' }}>Flight Number</td>
-                  {flightData.map((flight) => (
-                    <React.Fragment key={flight.id}>
-                      <td style={{ padding: '12px', textAlign: 'center', fontFamily: 'monospace', fontSize: '13px' }}>
-                        {flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || 'N/A'}
+                {/* Flight Number Row */}
+                <tr style={{ borderBottom: '1px solid #DADDE2', backgroundColor: '#ffffff' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#F7F9FB'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}>
+                  <td style={{ padding: '8px 12px', fontWeight: '500', color: '#4A4A4A' }}>Flight Number</td>
+                  {flightData.map((flight) => {
+                    const flightNumber = flight.originalFlight?.flightNumber || flight.fullName.split(' ').slice(1).join(' ') || null;
+                    return (
+                      <td key={flight.id} style={{ padding: '8px 12px', textAlign: 'center' }}>
+                        <span style={{ fontFamily: 'monospace', fontSize: '13px', color: '#4A4A4A', fontWeight: '400', opacity: 0.7 }}>
+                          {flightNumber || '—'}
+                        </span>
                       </td>
-                      {flightData.length === 2 && (
-                        <td style={{ padding: '12px', textAlign: 'center' }}>–</td>
-                      )}
-                    </React.Fragment>
-                  ))}
+                    );
+                  })}
                 </tr>
               </tbody>
             </table>
           </div>
+          
+          {/* Summary Line */}
+          {flightData.length === 2 && (() => {
+            const flight1 = flightData[0];
+            const flight2 = flightData[1];
+            const label1 = getShortFlightLabel(flight1);
+            const label2 = getShortFlightLabel(flight2);
+            
+            const wins1 = [];
+            const wins2 = [];
+            
+            // Price comparison
+            if (flight1.actualPrice < flight2.actualPrice) {
+              wins1.push('Price');
+            } else if (flight2.actualPrice < flight1.actualPrice) {
+              wins2.push('Price');
+            }
+            
+            // Duration comparison
+            if (flight1.actualDurationHours < flight2.actualDurationHours) {
+              wins1.push('Duration');
+            } else if (flight2.actualDurationHours < flight1.actualDurationHours) {
+              wins2.push('Duration');
+            }
+            
+            // Stops comparison (only if different)
+            if (flight1.actualStops < flight2.actualStops) {
+              wins1.push('Stops');
+            } else if (flight2.actualStops < flight1.actualStops) {
+              wins2.push('Stops');
+            }
+            
+            const summaryParts = [];
+            if (wins1.length > 0) {
+              const winsText = wins1.length === 1 ? wins1[0] : wins1.slice(0, -1).join(', ') + ' and ' + wins1[wins1.length - 1];
+              summaryParts.push(`${label1} wins on ${winsText}`);
+            }
+            if (wins2.length > 0) {
+              const winsText = wins2.length === 1 ? wins2[0] : wins2.slice(0, -1).join(', ') + ' and ' + wins2[wins2.length - 1];
+              summaryParts.push(`${label2} wins on ${winsText}`);
+            }
+            
+            if (summaryParts.length > 0) {
+              return (
+                <div style={{
+                  marginTop: '12px',
+                  padding: '10px 14px',
+                  backgroundColor: '#F7F9FB',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  color: '#4A4A4A',
+                  lineHeight: '1.5',
+                  border: '1px solid #DADDE2'
+                }}>
+                  {summaryParts.join('. ')}.
+                </div>
+              );
+            }
+            return null;
+          })()}
         </div>
         
       </div>

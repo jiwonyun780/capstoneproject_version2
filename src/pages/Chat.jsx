@@ -132,18 +132,51 @@ async function sendToApi(messages, context, sessionId, preferences = null) {
   
   if (preferences && preferences.preferences) {
     requestBody.preferences = preferences.preferences;
-    // Preferences are being sent to API
+    console.log('[Chat] ✅ Sending preferences to API:', requestBody.preferences);
   } else {
     console.warn('[Chat] ⚠️ No preferences provided! preferences =', JSON.stringify(preferences, null, 2));
   }
   
-  const res = await fetch(`${base}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody),
-  });
-  if (!res.ok) throw new Error('API error');
-  return res.json();
+  console.log('[Chat] sendToApi - Making request to:', `${base}/api/chat`);
+  console.log('[Chat] sendToApi - Request body size:', JSON.stringify(requestBody).length, 'bytes');
+  
+  let res;
+  try {
+    // Add timeout to fetch request (60 seconds to accommodate backend processing)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    
+    res = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    console.log('[Chat] sendToApi - Response status:', res.status, res.statusText);
+  } catch (fetchError) {
+    if (fetchError.name === 'AbortError') {
+      console.error('[Chat] sendToApi - Request timeout after 60 seconds');
+      throw new Error('Request timeout: The server took too long to respond. The backend may be processing multiple API calls. Please try again.');
+    } else {
+      console.error('[Chat] sendToApi - Fetch error:', fetchError);
+      throw new Error(`Network error: ${fetchError.message}. Please check if the backend server is running.`);
+    }
+  }
+  
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => 'Unknown error');
+    console.error('[Chat] API error:', res.status, errorText);
+    throw new Error(`API error: ${res.status} - ${errorText}`);
+  }
+  
+  const data = await res.json();
+  console.log('[Chat] sendToApi success, response keys:', Object.keys(data));
+  console.log('[Chat] sendToApi - Response has reply:', !!data.reply);
+  console.log('[Chat] sendToApi - Response has dashboardData:', !!data.dashboardData);
+  console.log('[Chat] sendToApi - Response has amadeus_data:', !!data.amadeus_data);
+  return data;
 }
 
 export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashboard, showDashboard, dashboardData, onHideDashboard }) {
@@ -155,27 +188,86 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
   const [context, setContext] = useState(null);
   const [, setIsLoadingContext] = useState(true);
   const [sessionId, setSessionId] = useState(null);
+  // Restore preferences from sessionStorage if available (survives HMR)
+  // But ignore if this is a new trip from Home page
+  const restorePreferencesFromStorage = () => {
+    // If this is a new trip from Home, don't restore from sessionStorage
+    if (location.state?.newTrip) {
+      console.log('[Chat] New trip detected, skipping sessionStorage restore');
+      // Clear sessionStorage for new trip
+      try {
+        sessionStorage.removeItem('miles_user_preferences');
+        sessionStorage.removeItem('miles_onboarding_complete');
+      } catch (e) {
+        console.warn('[Chat] Failed to clear sessionStorage:', e);
+      }
+      return { preferences: null, onboardingComplete: false };
+    }
+    
+    try {
+      const savedPreferences = sessionStorage.getItem('miles_user_preferences');
+      const savedOnboardingComplete = sessionStorage.getItem('miles_onboarding_complete');
+      if (savedPreferences && savedOnboardingComplete === 'true') {
+        const parsed = JSON.parse(savedPreferences);
+        console.log('[Chat] Restored preferences from sessionStorage:', parsed);
+        return { preferences: parsed, onboardingComplete: true };
+      }
+    } catch (e) {
+      console.warn('[Chat] Failed to restore preferences from sessionStorage:', e);
+    }
+    return { preferences: null, onboardingComplete: false };
+  };
+
+  const restored = restorePreferencesFromStorage();
   // If coming from Back to Results, skip preference form immediately
-  const [onboardingComplete, setOnboardingComplete] = useState(location.state?.restoreConversation || false);
-  const [userPreferences, setUserPreferences] = useState(null);
+  // If newTrip is true, always show preference form
+  const [onboardingComplete, setOnboardingComplete] = useState(
+    location.state?.restoreConversation || (location.state?.newTrip ? false : restored.onboardingComplete)
+  );
+  const [userPreferences, setUserPreferences] = useState(restored.preferences);
   const [hasExistingItinerary, setHasExistingItinerary] = useState(location.state?.hasExistingItinerary || false);
   const [showTripChoiceBanner, setShowTripChoiceBanner] = useState(false);
   const [showNewTripConfirm, setShowNewTripConfirm] = useState(false);
   const scrollRef = useRef(null);
   const pendingMessageSentRef = useRef(false);
+  const initializedRef = useRef(false);
 
   const quickReplies = ['Plan a trip to Paris', 'Budget accommodations', 'Check weather'];
 
   const handleOnboardingComplete = (preferences) => {
+    console.log('[Chat] handleOnboardingComplete called with preferences:', preferences);
     setUserPreferences(preferences);
     setOnboardingComplete(true);
-    // Note: We don't save to localStorage so the form shows every time the user visits
+    // Save preferences to sessionStorage to survive HMR
+    try {
+      sessionStorage.setItem('miles_user_preferences', JSON.stringify(preferences));
+      sessionStorage.setItem('miles_onboarding_complete', 'true');
+      console.log('[Chat] Saved preferences to sessionStorage');
+    } catch (e) {
+      console.warn('[Chat] Failed to save preferences to sessionStorage:', e);
+    }
   };
 
   // Function to start a new trip - clears everything and initializes fresh
   const handleStartNewTrip = async () => {
+    // Surface preference form immediately
+    setOnboardingComplete(false);
+    pendingMessageSentRef.current = false;
+    setIsTyping(false);
+    setError(null);
+    initializedRef.current = false; // Reset initialization flag for new trip
+
     // Clear all saved data
     resetAllTripData();
+    
+    // Clear preferences from sessionStorage
+    try {
+      sessionStorage.removeItem('miles_user_preferences');
+      sessionStorage.removeItem('miles_onboarding_complete');
+      console.log('[Chat] Cleared preferences from sessionStorage');
+    } catch (e) {
+      console.warn('[Chat] Failed to clear preferences from sessionStorage:', e);
+    }
     
     // Reset state
     setMessages([]);
@@ -186,7 +278,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     setShowTripChoiceBanner(false);
     setShowNewTripConfirm(false);
     
-    // Initialize fresh chat
+    // Initialize fresh chat session data in the background
     const locationContext = await getLocationContext();
     setContext(locationContext);
     
@@ -194,13 +286,15 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     setSessionId(newSessionId);
     
-    // Create fresh welcome message
-    let welcomeMessage = "Great, let's start a new trip. Where would you like to go?";
+    // Create fresh welcome message for when onboarding completes
+    let welcomeMessage = "Let’s plan a new trip! Once we know your preferences, where would you like to go?";
     
     if (locationContext.user_location.city && locationContext.user_location.country) {
-      welcomeMessage = `Great, let's start a new trip. I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}. Where would you like to go?`;
+      welcomeMessage = `Let’s plan a new trip! I can see you're in ${locationContext.user_location.city}, ${locationContext.user_location.country}. Once we know your preferences, where would you like to go?`;
     } else if (locationContext.user_location.country) {
-      welcomeMessage = `Great, let's start a new trip. I can see you're in ${locationContext.user_location.country}. Where would you like to go?`;
+      welcomeMessage = `Let’s plan a new trip! I can see you're in ${locationContext.user_location.country}. Once we know your preferences, where would you like to go?`;
+    } else {
+      welcomeMessage = "Let’s plan a new trip! After you set your preferences, what destination should we explore?";
     }
     
     setMessages([{
@@ -210,12 +304,23 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     }]);
     
     setIsLoadingContext(false);
-    setOnboardingComplete(true);
   };
 
   // Initialize context and welcome message
   useEffect(() => {
     const initializeChat = async () => {
+      // Skip initialization if already initialized and onboarding is complete
+      // This prevents resetting state when component re-renders after preference form submission
+      // Also check if messages already exist (from preference form submission or previous initialization)
+      if (initializedRef.current && (onboardingComplete || messages.length > 0)) {
+        console.log('[Chat] Skipping initialization - already initialized', {
+          initialized: initializedRef.current,
+          onboardingComplete,
+          messagesCount: messages.length
+        });
+        return;
+      }
+
       try {
         // Detect if this is a refresh (reload) or navigation (back/forward/new)
         const navigationEntry = performance.getEntriesByType('navigation')[0];
@@ -230,7 +335,9 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           isRefresh,
           shouldRestore,
           hasItinerary,
-          locationState: location.state
+          locationState: location.state,
+          alreadyInitialized: initializedRef.current,
+          onboardingComplete
         });
         
         if (hasItinerary) {
@@ -349,26 +456,46 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
         
         welcomeMessage += " Where would you like to go?";
         
-        setMessages([{
-          role: 'assistant',
-          content: welcomeMessage,
-          timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-        }]);
+        // Only set messages if they don't already exist (prevents overwriting after preference form submission)
+        if (messages.length === 0) {
+          setMessages([{
+            role: 'assistant',
+            content: welcomeMessage,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          }]);
+        } else {
+          console.log('[Chat] Skipping message initialization - messages already exist');
+        }
       } catch (e) {
         console.error('Failed to initialize context:', e);
-        setMessages([{
-          role: 'assistant',
-          content: "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip. Where would you like to go?",
-          timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-        }]);
+        // Only set messages if they don't already exist
+        if (messages.length === 0) {
+          setMessages([{
+            role: 'assistant',
+            content: "Hi! I'm Miles, your AI travel assistant. I'm here to help you plan the perfect trip. Where would you like to go?",
+            timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          }]);
+        }
       } finally {
         setIsLoadingContext(false);
+        initializedRef.current = true;
+        console.log('[Chat] Initialization complete, initializedRef set to true');
       }
     };
     
     initializeChat();
   }, []);
   
+  // Track userPreferences changes
+  useEffect(() => {
+    console.log('[Chat] userPreferences changed:', userPreferences);
+  }, [userPreferences]);
+
+  // Track onboardingComplete changes
+  useEffect(() => {
+    console.log('[Chat] onboardingComplete changed:', onboardingComplete);
+  }, [onboardingComplete]);
+
   // Auto-save conversation whenever messages change (for Back to Results flow)
   useEffect(() => {
     // Save conversation only if there are messages (not just welcome message)
@@ -976,22 +1103,32 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
     }
     
     // Check if user is requesting itinerary generation (explicit request)
-    const isItineraryRequest = textLower.includes('generate itinerary') || 
+    // IMPORTANT: Do NOT treat flight/hotel search requests as itinerary requests
+    const isFlightSearchOnly = textLower.includes('search for flight') || 
+                               textLower.includes('find flight') ||
+                               textLower.includes('look for flight') ||
+                               textLower.includes('show flight') ||
+                               (textLower.includes('flight') && (textLower.includes('from') || textLower.includes('to')) && !textLower.includes('itinerary'));
+    
+    const isItineraryRequest = !isFlightSearchOnly && (
+                               textLower.includes('generate itinerary') || 
                                textLower.includes('generate itineary') ||
                                textLower.includes('create itinerary') ||
                                textLower.includes('make itinerary') ||
                                textLower.includes('plan itinerary') ||
                                textLower.includes('show itinerary') ||
-                               (textLower.includes('itinerary') && (textLower.includes('from') || textLower.includes('to')));
+                               (textLower.includes('itinerary') && (textLower.includes('from') || textLower.includes('to'))));
     
     // Check if user wants to add to existing itinerary
-    const isAddToItinerary = textLower.includes('add to itinerary') || 
+    // IMPORTANT: Do NOT auto-navigate for flight/hotel search only requests
+    const isAddToItinerary = !isFlightSearchOnly && (
+                            textLower.includes('add to itinerary') || 
                             textLower.includes('add to itineary') ||
                             textLower.includes('update itinerary') ||
                             textLower.includes('back to itinerary') ||
                             textLower.includes('return to itinerary') ||
                             textLower.includes('go back to itinerary') ||
-                            hasExistingItinerary; // If we have existing itinerary, treat as add to itinerary
+                            (hasExistingItinerary && (textLower.includes('add') || textLower.includes('update') || textLower.includes('itinerary')))); // Only treat as add if user explicitly mentions itinerary
     
     // Check if user is confirming itinerary creation (yes/ok response to assistant's question)
     const isAffirmativeResponse = /^(yes|yeah|yep|yup|ok|okay|sure|please|do it|go ahead|create it|make it|show me|let's do it)$/i.test(text.trim());
@@ -1006,11 +1143,13 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                                            previousAssistantMsg.includes('create a detailed'));
     
     // If user says yes/ok to itinerary question, skip API call and go directly to itinerary page
-    const shouldNavigateToItinerary = isItineraryRequest || (isAffirmativeResponse && isAssistantAskingForItinerary);
+    // IMPORTANT: Do NOT navigate for flight/hotel search only requests
+    const shouldNavigateToItinerary = !isFlightSearchOnly && (isItineraryRequest || (isAffirmativeResponse && isAssistantAskingForItinerary));
     
     try {
           // If user is confirming itinerary creation, skip API call and navigate directly
-          if (isAffirmativeResponse && isAssistantAskingForItinerary && !isItineraryRequest) {
+          // IMPORTANT: Do NOT navigate for flight/hotel search only requests
+          if (!isFlightSearchOnly && isAffirmativeResponse && isAssistantAskingForItinerary && !isItineraryRequest) {
             console.log('User confirmed itinerary creation - navigating directly to itinerary page');
             setIsTyping(false);
             // Small delay to ensure UI updates
@@ -1344,8 +1483,43 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
           }
           
           const payload = [...messages, userMsg];
-          const data = await sendToApi(payload, context, sessionId, userPreferences);
+          console.log('[Chat] handleSend - userPreferences:', userPreferences);
+          console.log('[Chat] Sending API request with payload:', {
+            messageCount: payload.length,
+            lastMessage: payload[payload.length - 1]?.content?.substring(0, 100),
+            hasContext: !!context,
+            hasSessionId: !!sessionId,
+            hasPreferences: !!userPreferences
+          });
+          
+          let data;
+          try {
+            data = await sendToApi(payload, context, sessionId, userPreferences);
+            console.log('[Chat] API response received:', { 
+            hasReply: !!data.reply, 
+            replyLength: data.reply?.length || 0,
+            hasDashboardData: !!data.dashboardData,
+            hasAmadeusData: !!data.amadeus_data,
+            dashboardDataKeys: data.dashboardData ? Object.keys(data.dashboardData) : [],
+            amadeusDataKeys: data.amadeus_data ? Object.keys(data.amadeus_data) : [],
+            outboundFlights: data.dashboardData?.outboundFlights?.length || data.amadeus_data?.outboundFlights?.length || 0,
+            returnFlights: data.dashboardData?.returnFlights?.length || data.amadeus_data?.returnFlights?.length || 0,
+            fullResponse: data
+          });
+          } catch (apiError) {
+            console.error('[Chat] API call failed:', apiError);
+            console.error('[Chat] API error details:', {
+              message: apiError.message,
+              stack: apiError.stack,
+              name: apiError.name
+            });
+            throw apiError; // Re-throw to be caught by outer try-catch
+          }
+          
           const reply = data.reply || '';
+          if (!reply) {
+            console.warn('[Chat] ⚠️ No reply in API response!', data);
+          }
           setMessages((prev) => [...prev, { role: 'assistant', content: reply, timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) }]);
           
           // Save optimalFlight to tripState if available in amadeus_data
@@ -1477,6 +1651,19 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
                 optimalFlight: optimalFlight
               });
               
+            }
+          }
+          
+          // Show flight dashboard if flight data is available
+          if (flightData && (flightData.outboundFlights || flightData.returnFlights)) {
+            console.log('[Chat] Flight data detected, showing dashboard:', {
+              hasOutbound: !!flightData.outboundFlights,
+              hasReturn: !!flightData.returnFlights,
+              outboundCount: flightData.outboundFlights?.length || 0,
+              returnCount: flightData.returnFlights?.length || 0
+            });
+            if (onShowDashboard) {
+              onShowDashboard(flightData);
             }
           }
           
@@ -2196,6 +2383,7 @@ export default function Chat({ pendingMessage, onPendingMessageSent, onShowDashb
       timestamp={m.timestamp}
       onGenerateItinerary={m.role === 'assistant' ? (messageContent) => handleGenerateItinerary(messageContent) : null}
       onSaveTrip={m.role === 'assistant' ? (messageContent) => handleSaveTrip(messageContent) : null}
+      userPreferences={userPreferences}
     />
     // eslint-disable-next-line react-hooks/exhaustive-deps
   )), [messages, dashboardData, userPreferences]);

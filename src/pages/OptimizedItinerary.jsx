@@ -2643,6 +2643,15 @@ export default function OptimizedItinerary() {
   // Extract price helper function
   const extractPrice = (item) => {
     if (!item) return 0;
+    // First check for price_per_night (common for hotels)
+    if (item.price_per_night !== null && item.price_per_night !== undefined) {
+      if (typeof item.price_per_night === 'number') return item.price_per_night;
+      if (typeof item.price_per_night === 'string') {
+        const parsed = parseFloat(item.price_per_night);
+        if (!isNaN(parsed)) return parsed;
+      }
+    }
+    // Then check for price field
     if (item.price === null || item.price === undefined) return 0;
     if (typeof item.price === 'number') return item.price;
     if (typeof item.price === 'object' && item.price !== null) {
@@ -2664,26 +2673,69 @@ export default function OptimizedItinerary() {
   
   // Calculate hotel cost: use totalPrice from hotelStays if available, otherwise calculate from price × nights
   let hotelsCost = 0;
+  console.log('=== Hotel Cost Calculation Debug ===');
+  console.log('finalHotel:', finalHotel);
+  console.log('itineraryData?.hotelStays:', itineraryData?.hotelStays);
   if (itineraryData?.hotelStays && itineraryData.hotelStays.length > 0 && itineraryData.hotelStays[0].totalPrice > 0) {
     hotelsCost = itineraryData.hotelStays[0].totalPrice;
+    console.log('Using hotelStays totalPrice:', hotelsCost);
   } else if (finalHotel) {
-    const pricePerNight = extractPrice(finalHotel);
-    // Calculate nights from check-in/check-out dates if available
-    if (finalHotel.check_in && finalHotel.check_out) {
-      try {
-        const checkIn = new Date(finalHotel.check_in);
-        const checkOut = new Date(finalHotel.check_out);
-        const nights = Math.max(1, Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24)));
-        hotelsCost = pricePerNight * nights;
-      } catch (e) {
-        // Fallback: use pricePerNight as total if date calculation fails
-        hotelsCost = pricePerNight;
-      }
+    // First check if hotel has a total_price or totalPrice field (already calculated total)
+    if (finalHotel.total_price !== null && finalHotel.total_price !== undefined && finalHotel.total_price > 0) {
+      hotelsCost = typeof finalHotel.total_price === 'number' ? finalHotel.total_price : parseFloat(finalHotel.total_price) || 0;
+      console.log('Using hotel.total_price:', hotelsCost);
+    } else if (finalHotel.totalPrice !== null && finalHotel.totalPrice !== undefined && finalHotel.totalPrice > 0) {
+      hotelsCost = typeof finalHotel.totalPrice === 'number' ? finalHotel.totalPrice : parseFloat(finalHotel.totalPrice) || 0;
+      console.log('Using hotel.totalPrice:', hotelsCost);
     } else {
-      // No dates available, use pricePerNight as estimate
-      hotelsCost = pricePerNight;
+      // Calculate from price_per_night × nights
+      const pricePerNight = extractPrice(finalHotel);
+      console.log('Extracted pricePerNight:', pricePerNight);
+      console.log('finalHotel.price:', finalHotel.price);
+      console.log('finalHotel.price_per_night:', finalHotel.price_per_night);
+      if (pricePerNight > 0) {
+        // Calculate nights from check-in/check-out dates
+        let checkIn = null;
+        let checkOut = null;
+        
+        // Try to get dates from hotel object first
+        if (finalHotel.check_in && finalHotel.check_out) {
+          checkIn = finalHotel.check_in;
+          checkOut = finalHotel.check_out;
+        } else if (routeInfo?.date && routeInfo?.returnDate) {
+          // Fallback to routeInfo dates
+          checkIn = routeInfo.date;
+          checkOut = routeInfo.returnDate;
+        } else if (itineraryData?.routeInfo?.date && itineraryData?.routeInfo?.returnDate) {
+          // Fallback to itineraryData routeInfo dates
+          checkIn = itineraryData.routeInfo.date;
+          checkOut = itineraryData.routeInfo.returnDate;
+        }
+        
+        if (checkIn && checkOut) {
+          try {
+            const checkInDate = new Date(checkIn);
+            const checkOutDate = new Date(checkOut);
+            const nights = Math.max(1, Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24)));
+            hotelsCost = pricePerNight * nights;
+            console.log('Calculated hotelsCost from pricePerNight × nights:', hotelsCost, `(${pricePerNight} × ${nights})`);
+          } catch (e) {
+            console.warn('Failed to calculate hotel nights from dates:', e);
+            // Fallback: use pricePerNight as estimate (assume 1 night minimum)
+            hotelsCost = pricePerNight;
+            console.log('Using pricePerNight as fallback (1 night):', hotelsCost);
+          }
+        } else {
+          // No dates available, use pricePerNight as estimate (assume 1 night minimum)
+          hotelsCost = pricePerNight;
+          console.log('No dates available, using pricePerNight as estimate (1 night):', hotelsCost);
+        }
+      } else {
+        console.warn('pricePerNight is 0 or invalid, hotelsCost remains 0');
+      }
     }
   }
+  console.log('Final hotelsCost:', hotelsCost);
   
   // Calculate activities cost from must-do activities and API response
   let activitiesCost = 0;

@@ -333,7 +333,7 @@ function renderTextWithMapLinks(text) {
 }
 
 // Render itinerary visual components
-function renderItineraryVisual(content, skipMarkdown = false) {
+function renderItineraryVisual(content, skipMarkdown = false, userPreferences = null) {
   const itineraryMatch = content.match(/```itinerary\n([\s\S]*?)\n```/);
   if (!itineraryMatch) {
     // Prevent infinite recursion: if skipMarkdown is true, return plain text
@@ -342,7 +342,7 @@ function renderItineraryVisual(content, skipMarkdown = false) {
     }
     // Remove itinerary block and render the rest
     const withoutItinerary = content.replace(/```itinerary[\s\S]*?```/g, '');
-    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true) : null;
+    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true, userPreferences) : null;
   }
   
   try {
@@ -360,7 +360,7 @@ function renderItineraryVisual(content, skipMarkdown = false) {
             time={day.time}
           />
         ))}
-        {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true)}
+        {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true, userPreferences)}
       </div>
     );
   } catch (e) {
@@ -370,13 +370,45 @@ function renderItineraryVisual(content, skipMarkdown = false) {
     }
     // Remove itinerary block and render the rest
     const withoutItinerary = content.replace(/```itinerary[\s\S]*?```/g, '');
-    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true) : null;
+    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true, userPreferences) : null;
   }
 }
 
 // Render location visual components
-function renderLocationVisual(content, skipMarkdown = false) {
+function renderLocationVisual(content, skipMarkdown = false, userPreferences = null) {
   const locationMatch = content.match(/```location\n([\s\S]*?)\n```/);
+  
+  // Check if this is a hotel-related LocationCard and if there's a hotel table
+  // If hotel table exists, skip rendering LocationCard (they're shown in the table instead)
+  const hasHotelTable = content.includes('|') && (
+    content.toLowerCase().includes('hotel') && 
+    (content.toLowerCase().includes('price') || content.toLowerCase().includes('rating'))
+  );
+  
+  if (hasHotelTable && locationMatch) {
+    // Parse to check if it's a hotel
+    try {
+      const locationData = JSON.parse(locationMatch[1]);
+      const isHotel = Array.isArray(locationData) 
+        ? locationData.some(loc => 
+            loc.name?.toLowerCase().includes('hotel') || 
+            loc.description?.toLowerCase().includes('hotel') ||
+            loc.price // Hotels usually have price
+          )
+        : (locationData.name?.toLowerCase().includes('hotel') || 
+           locationData.description?.toLowerCase().includes('hotel') ||
+           locationData.price);
+      
+      if (isHotel) {
+        // Skip rendering hotel LocationCard when hotel table exists
+        const remainingContent = content.replace(/```location\n[\s\S]*?\n```/g, '');
+        return remainingContent.trim() ? renderMarkdown(remainingContent, null, null, true, userPreferences) : null;
+      }
+    } catch (e) {
+      // Continue with normal rendering if parsing fails
+    }
+  }
+  
   if (!locationMatch) {
     // Prevent infinite recursion: if skipMarkdown is true, return plain text
     if (skipMarkdown) {
@@ -384,7 +416,7 @@ function renderLocationVisual(content, skipMarkdown = false) {
     }
     // Remove location block and render the rest
     const withoutLocation = content.replace(/```location[\s\S]*?```/g, '');
-    return withoutLocation ? renderMarkdown(withoutLocation, null, null, true) : null;
+    return withoutLocation ? renderMarkdown(withoutLocation, null, null, true, userPreferences) : null;
   }
   
   try {
@@ -413,7 +445,7 @@ function renderLocationVisual(content, skipMarkdown = false) {
             price={locationData.price}
           />
         )}
-        {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true)}
+        {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true, userPreferences)}
       </div>
     );
   } catch (e) {
@@ -428,22 +460,157 @@ function renderLocationVisual(content, skipMarkdown = false) {
 }
 
 // Enhanced markdown renderer with visual components for travel assistant responses
-function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, skipVisualCheck = false) {
+function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, skipVisualCheck = false, userPreferences = null) {
   if (!content) return '';
   
   // Check for special visual patterns first (unless we're already processing them to prevent recursion)
   if (!skipVisualCheck) {
   if (content.includes('```itinerary')) {
-      return renderItineraryVisual(content, false);
+      return renderItineraryVisual(content, false, userPreferences);
   }
   
   if (content.includes('```location')) {
-      return renderLocationVisual(content, false);
+      return renderLocationVisual(content, false, userPreferences);
+    }
+  }
+  
+  // Filter out hotel cards and duplicate hotel-related content before tables
+  // This prevents large hotel cards from appearing before the hotel table section
+  let filteredContent = content;
+  
+  // Check if content contains a hotel table - if so, filter out hotel cards and duplicate content
+  const hasHotelTable = content.includes('|') && (
+    content.toLowerCase().includes('hotel') && 
+    (content.toLowerCase().includes('price') || content.toLowerCase().includes('rating'))
+  );
+  
+  if (hasHotelTable) {
+    // Remove all 📍 emoji hotel cards (simple format) that appear before the "Top Recommendations" section
+    // These are the simple cards with format: 📍 + **Hotel Name** + description + ⭐ rating + 💰 price
+    
+    // Find "Top Recommendations" section (case-insensitive, with or without # headers)
+    let beforeTopRec = -1;
+    const topRecPatterns = [
+      /##\s+Top Recommendations/i,
+      /#\s+Top Recommendations/i,
+      /\nTop Recommendations/i,
+      /Top Recommendations/i
+    ];
+    
+    for (const pattern of topRecPatterns) {
+      const match = filteredContent.match(pattern);
+      if (match) {
+        beforeTopRec = match.index;
+        break;
+      }
+    }
+    
+    if (beforeTopRec === -1) {
+      // If "Top Recommendations" not found, try to find table and remove everything before it
+      const tableIndex = filteredContent.indexOf('|');
+      if (tableIndex !== -1) {
+        beforeTopRec = tableIndex;
+      } else {
+        beforeTopRec = filteredContent.length;
+      }
+    }
+    
+    const beforeTopRecSection = filteredContent.substring(0, beforeTopRec);
+    const afterTopRecSection = filteredContent.substring(beforeTopRec);
+    
+    // Remove all 📍 hotel cards from the section before "Top Recommendations"
+    let cleanedBeforeSection = beforeTopRecSection;
+    
+    // More aggressive pattern: Remove ALL 📍 blocks (even if they span many lines)
+    // This pattern matches: 📍 (optional newline) **Hotel Name** followed by anything until next 📍 or end or heading
+    cleanedBeforeSection = cleanedBeforeSection.replace(/📍\s*\n?\s*\*\*[^*]+\*\*[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|$)/gi, '');
+    
+    // Also handle case where 📍 is on same line
+    cleanedBeforeSection = cleanedBeforeSection.replace(/📍\s*\*\*[^*]+\*\*[^\n]*[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|$)/gi, '');
+    
+    // Remove any standalone 📍 lines
+    cleanedBeforeSection = cleanedBeforeSection.replace(/^📍\s*$/gm, '');
+    cleanedBeforeSection = cleanedBeforeSection.replace(/^📍\s*\n/gm, '');
+    
+    // Remove single-line 📍 hotel cards (LocationCard format)
+    // Pattern: 📍 Hotel Name description rating price (all on one line or few lines)
+    cleanedBeforeSection = cleanedBeforeSection.replace(/^📍\s+[^*]*(?:Hotel|hotel)[^\n]*(?:\n(?!📍|🏨|#|##|\|)[^\n]*)*/gmi, '');
+    
+    // Remove introductory text patterns (more comprehensive)
+    cleanedBeforeSection = cleanedBeforeSection.replace(/I found (some |great |excellent )?hotel options?[^.]*\.[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|$)/gi, '');
+    cleanedBeforeSection = cleanedBeforeSection.replace(/I found (some |great |excellent )?hotels?[^.]*\.[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|$)/gi, '');
+    cleanedBeforeSection = cleanedBeforeSection.replace(/Here are the top recommendations?[^.]*\.[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|$)/gi, '');
+    
+    // Clean up multiple empty lines
+    cleanedBeforeSection = cleanedBeforeSection.replace(/\n\n\n+/g, '\n\n');
+    
+    // Recombine
+    filteredContent = cleanedBeforeSection + afterTopRecSection;
+    
+    // Final pass: Remove any remaining 📍 hotel cards that appear before the table
+    // Split by table to preserve table content
+    const tableStartIndex = filteredContent.indexOf('|');
+    if (tableStartIndex !== -1) {
+      const beforeTable = filteredContent.substring(0, tableStartIndex);
+      const tableAndAfter = filteredContent.substring(tableStartIndex);
+      
+      // Remove any 📍 cards from before table section (more comprehensive)
+      let cleanedBeforeTable = beforeTable;
+      // Remove 📍 hotel cards with bold hotel names
+      cleanedBeforeTable = cleanedBeforeTable.replace(/📍\s*\n?\s*\*\*[^*]+\*\*[\s\S]*?(?=\n\n|\n📍|\n🏨|(?:\n#+\s+Top Recommendations)|\n\|)/gi, '');
+      // Remove 📍 hotel cards without bold (LocationCard format)
+      cleanedBeforeTable = cleanedBeforeTable.replace(/^📍\s+[^*]*(?:Hotel|hotel)[^\n]*(?:\n(?!📍|🏨|#|##|\|)[^\n]*)*/gmi, '');
+      // Remove any standalone 📍 lines
+      cleanedBeforeTable = cleanedBeforeTable.replace(/^📍\s*$/gm, '');
+      filteredContent = cleanedBeforeTable + tableAndAfter;
+    }
+    
+    // Remove duplicate "Hotels in {city}" headings - keep only one
+    const hotelHeadingPattern = /^#+\s*Hotels?\s+in\s+[A-Za-z\s]+$/gmi;
+    const hotelHeadings = [...filteredContent.matchAll(hotelHeadingPattern)];
+    if (hotelHeadings.length > 1) {
+      // Remove all but the first occurrence
+      let firstFound = false;
+      filteredContent = filteredContent.replace(hotelHeadingPattern, (match) => {
+        if (!firstFound) {
+          firstFound = true;
+          return match;
+        }
+        return '';
+      });
+    }
+    
+    // Remove duplicate "Here are some hotel recommendations" paragraphs - keep only one
+    const introPattern = /Here are some hotel recommendations[^.]*\./gi;
+    const introMatches = [...filteredContent.matchAll(introPattern)];
+    if (introMatches.length > 1) {
+      let firstFound = false;
+      filteredContent = filteredContent.replace(introPattern, (match) => {
+        if (!firstFound) {
+          firstFound = true;
+          return match;
+        }
+        return '';
+      });
+    }
+    
+    // Remove duplicate "Prices may vary" or "Prices can vary" disclaimers - keep only one
+    const disclaimerPattern = /(?:Prices? (?:may|can) vary[^.]*\.|Prices? can vary by site[^.]*\.)/gi;
+    const disclaimerMatches = [...filteredContent.matchAll(disclaimerPattern)];
+    if (disclaimerMatches.length > 1) {
+      let firstFound = false;
+      filteredContent = filteredContent.replace(disclaimerPattern, (match) => {
+        if (!firstFound) {
+          firstFound = true;
+          return match;
+        }
+        return '';
+      });
     }
   }
   
   // Split content into lines for processing
-  const lines = content.split('\n');
+  const lines = filteredContent.split('\n');
   const elements = [];
   let inTable = false;
   let tableRows = [];
@@ -454,14 +621,19 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, 
     
     // Handle headers
     // Skip rendering "Outbound Flights" and "Return Flights" headers as they're handled by the table renderer
+    // Also skip duplicate "Hotels in {city}" headings when hotel table is present (table renderer creates its own)
     if (line.startsWith('# ')) {
       const headerText = line.substring(2).trim();
-      if (!headerText.toLowerCase().includes('outbound flights') && !headerText.toLowerCase().includes('return flights')) {
+      const isOutboundOrReturn = headerText.toLowerCase().includes('outbound flights') || headerText.toLowerCase().includes('return flights');
+      const isDuplicateHotelHeading = hasHotelTable && /^Hotels?\s+in\s+[A-Za-z\s]+$/i.test(headerText);
+      if (!isOutboundOrReturn && !isDuplicateHotelHeading) {
         elements.push(<h1 key={i} style={{ fontSize: '18px', fontWeight: '700', margin: '12px 0 8px 0', color: '#004C8C' }}>{headerText}</h1>);
       }
     } else if (line.startsWith('## ')) {
       const headerText = line.substring(3).trim();
-      if (!headerText.toLowerCase().includes('outbound flights') && !headerText.toLowerCase().includes('return flights')) {
+      const isOutboundOrReturn = headerText.toLowerCase().includes('outbound flights') || headerText.toLowerCase().includes('return flights');
+      const isDuplicateHotelHeading = hasHotelTable && /^Hotels?\s+in\s+[A-Za-z\s]+$/i.test(headerText);
+      if (!isOutboundOrReturn && !isDuplicateHotelHeading) {
         elements.push(<h2 key={i} style={{ fontSize: '16px', fontWeight: '600', margin: '10px 0 6px 0', color: '#004C8C' }}>{headerText}</h2>);
       }
     } else if (line.startsWith('### ')) {
@@ -487,7 +659,7 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, 
     else if (line.startsWith('- ')) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content));
+        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content, null, userPreferences));
         inTable = false;
         tableRows = [];
       }
@@ -497,7 +669,7 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, 
     else if (/^\d+\.\s/.test(line)) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content));
+        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content, null, userPreferences));
         inTable = false;
         tableRows = [];
       }
@@ -507,17 +679,27 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, 
     else if (line) {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content));
+        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content, null, userPreferences));
         inTable = false;
         tableRows = [];
       }
+      // Skip duplicate hotel intro paragraphs and disclaimers when hotel table is present
+      const isDuplicateIntro = hasHotelTable && /Here are some hotel recommendations/i.test(line);
+      const isDuplicateDisclaimer = hasHotelTable && /(?:Prices? (?:may|can) vary|Prices? can vary by site)/i.test(line);
+      // Skip 📍 hotel cards when hotel table is present
+      const isHotelCard = hasHotelTable && /^📍\s*.{0,100}Hotel/i.test(line);
+      // Skip lines that start with 📍 followed by Hotel name (LocationCard format)
+      const isLocationCardFormat = hasHotelTable && /^📍\s*\*?\*?[^*]+\*?\*?\s+(Luxury|Boutique|Hotel|hotel|near|with)/i.test(line);
+      
+      if (!isDuplicateIntro && !isDuplicateDisclaimer && !isHotelCard && !isLocationCardFormat) {
       elements.push(<div key={i} style={{ margin: '6px 0', lineHeight: '1.5' }}>{renderTextWithMapLinks(line)}</div>);
+      }
     }
     // Handle empty lines
     else {
       if (inTable) {
         // Close table first
-        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content));
+        elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content, null, userPreferences));
         inTable = false;
         tableRows = [];
       }
@@ -527,7 +709,7 @@ function renderMarkdown(content, onGenerateItinerary = null, onSaveTrip = null, 
   
   // Close any remaining table
   if (inTable) {
-    elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content));
+    elements.push(renderTable(tableRows, tableIndex++, onGenerateItinerary, onSaveTrip, content, null, userPreferences));
   }
   
   return elements;
@@ -1327,7 +1509,7 @@ function HotelCard({ hotel }) {
   );
 }
 
-function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTrip = null, messageContent = '', onCompare = null) {
+function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTrip = null, messageContent = '', onCompare = null, userPreferences = null) {
   if (rows.length === 0) return null;
   
   // Generate a unique key for the table using index and a hash of first row content
@@ -1350,15 +1532,76 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
      rows[0].some(cell => cell && cell.toString().toLowerCase().includes('rating')))
   );
   
-  // Check if this is a Return Flights table (only show buttons for Return Flights, not Outbound)
-  const isReturnFlightsTable = messageContent.toLowerCase().includes('return flights') || 
-                                messageContent.toLowerCase().includes('## return flights');
+  // Determine if this is Outbound or Return Flights table based on context
+  // Check the text immediately before this table in the message
+  let isReturnFlightsTable = false;
+  let isOutboundFlightsTable = false;
   
-  // Check if this is an Outbound Flights table
-  const isOutboundFlightsTable = isFlightTable && !isReturnFlightsTable && (
-    messageContent.toLowerCase().includes('outbound flights') ||
-    messageContent.toLowerCase().includes('## outbound flights')
-  );
+  if (isFlightTable) {
+    // Find the table's position in the message by looking for the header row
+    const headerRowText = rows[0]?.join('|').toLowerCase() || '';
+    const tablePos = messageContent.toLowerCase().indexOf(headerRowText);
+    
+    if (tablePos !== -1) {
+      // Get text before the table (last 500 characters to check context)
+      const textBeforeTable = messageContent.toLowerCase().substring(Math.max(0, tablePos - 500), tablePos);
+      
+      // Check if "return flights" appears closer to the table than "outbound flights"
+      const returnFlightsBeforePos = textBeforeTable.lastIndexOf('return flights');
+      const outboundFlightsBeforePos = textBeforeTable.lastIndexOf('outbound flights');
+      
+      if (returnFlightsBeforePos !== -1 && outboundFlightsBeforePos !== -1) {
+        // Both exist - check which is closer to the table
+        if (returnFlightsBeforePos > outboundFlightsBeforePos) {
+          isReturnFlightsTable = true;
+        } else {
+          isOutboundFlightsTable = true;
+        }
+      } else if (returnFlightsBeforePos !== -1) {
+        isReturnFlightsTable = true;
+      } else if (outboundFlightsBeforePos !== -1) {
+        isOutboundFlightsTable = true;
+      } else {
+        // Fallback: check entire message
+        const returnFlightsIndex = messageContent.toLowerCase().indexOf('return flights');
+        const outboundFlightsIndex = messageContent.toLowerCase().indexOf('outbound flights');
+        
+        if (returnFlightsIndex !== -1 && outboundFlightsIndex !== -1) {
+          // Both exist - table is return if it's after return section, outbound if after outbound section
+          if (tablePos > returnFlightsIndex && tablePos > outboundFlightsIndex) {
+            // Table is after both - check which section is closer
+            if ((tablePos - returnFlightsIndex) < (tablePos - outboundFlightsIndex)) {
+              isReturnFlightsTable = true;
+            } else {
+              isOutboundFlightsTable = true;
+            }
+          } else if (tablePos > returnFlightsIndex) {
+            isReturnFlightsTable = true;
+          } else if (tablePos > outboundFlightsIndex) {
+            isOutboundFlightsTable = true;
+          } else {
+            // Table is before both sections - check which section comes first in message
+            if (outboundFlightsIndex < returnFlightsIndex) {
+              isOutboundFlightsTable = true;
+            } else {
+              isReturnFlightsTable = true;
+            }
+          }
+        } else if (returnFlightsIndex !== -1) {
+          isReturnFlightsTable = true;
+        } else if (outboundFlightsIndex !== -1) {
+          isOutboundFlightsTable = true;
+        }
+      }
+    } else {
+      // Fallback: simple check if message contains the keywords
+      if (messageContent.toLowerCase().includes('return flights')) {
+        isReturnFlightsTable = true;
+      } else if (messageContent.toLowerCase().includes('outbound flights')) {
+        isOutboundFlightsTable = true;
+      }
+    }
+  }
   
   // Check if this is an Activity table (has "Activity" in header and "Duration" or "Price")
   const isActivityTable = rows.length > 0 && rows[0] && (
@@ -1371,11 +1614,11 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
   
   // If it's an Activity table, render with improved UI
   if (isActivityTable && rows.length > 1) {
-    return <ActivityTable rows={rows} tableIndex={tableIndex} messageContent={messageContent} key={uniqueKey} />;
+    return <ActivityTable rows={rows} tableIndex={tableIndex} messageContent={messageContent} userPreferences={userPreferences} key={uniqueKey} />;
   }
   
   // Activity table component
-  function ActivityTable({ rows, tableIndex, messageContent }) {
+  function ActivityTable({ rows, tableIndex, messageContent, userPreferences = null }) {
     const [selectedActivities, setSelectedActivities] = useState(new Set());
     
     const headerRow = rows[0];
@@ -1406,8 +1649,17 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       const name = nameIndex >= 0 ? row[nameIndex] : '';
       if (!name) continue;
       
-      // Remove markdown formatting from name
-      const cleanName = name.toString().replace(/\*\*/g, '').trim();
+      // Extract URL and clean name from markdown link format [Title](url)
+      let cleanName = name.toString().replace(/\*\*/g, '').trim();
+      let activityUrl = null;
+      const markdownLinkMatch = cleanName.match(/\[([^\]]+)\]\(([^)]+)\)/);
+      if (markdownLinkMatch) {
+        cleanName = markdownLinkMatch[1].trim();
+        const url = markdownLinkMatch[2].trim();
+        activityUrl = url.startsWith('http://') || url.startsWith('https://') 
+          ? url 
+          : `https://${url}`;
+      }
       
       // Extract activity type from name or description
       let activityType = '';
@@ -1511,8 +1763,12 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
         }
       }
       
+      // Use activityUrl from name if available, otherwise use first booking link URL
+      const primaryUrl = activityUrl || (bookingLinks.length > 0 ? bookingLinks[0].url : null);
+      
       activities.push({
         name: cleanName,
+        url: primaryUrl,
         type: activityType,
         description,
         duration,
@@ -1522,9 +1778,61 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       });
     }
     
-    // Extract city name from message content
-    const cityMatch = messageContent.match(/in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i);
-    const cityName = cityMatch ? cityMatch[1] : 'Barcelona';
+    // Extract city name from message content - use more specific patterns
+    // Try patterns in order of specificity
+    let cityName = 'Barcelona'; // Default fallback
+    
+    // Pattern 1: "Top activities in [City]" or "activities in [City]"
+    const topActivitiesMatch = messageContent.match(/(?:Top\s+)?activities\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i);
+    if (topActivitiesMatch) {
+      cityName = topActivitiesMatch[1].trim();
+    } else {
+      // Pattern 2: "activities for you in [City]"
+      const activitiesForYouMatch = messageContent.match(/activities\s+(?:for\s+you\s+)?in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i);
+      if (activitiesForYouMatch) {
+        cityName = activitiesForYouMatch[1].trim();
+      } else {
+        // Pattern 3: "in [City] during" or "in [City] from"
+        const inCityDuringMatch = messageContent.match(/in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:during|from|to|on)/i);
+        if (inCityDuringMatch) {
+          cityName = inCityDuringMatch[1].trim();
+        }
+      }
+    }
+    
+    // Filter out common false positives (words that look like cities but aren't)
+    const falsePositives = ['local', 'bars', 'restaurants', 'cafes', 'shops', 'markets', 'museums', 'parks', 'gardens', 'streets', 'quarters'];
+    if (falsePositives.some(fp => cityName.toLowerCase().includes(fp))) {
+      // If extracted city contains false positive, try to find a real city name
+      // Look for common city names in the message
+      const commonCityPatterns = [
+        /(?:in|to|from)\s+(Barcelona|Paris|London|Rome|Madrid|Berlin|Amsterdam|Vienna|Prague|Lisbon|Athens|Dublin|Stockholm|Copenhagen|Oslo|Helsinki|Warsaw|Budapest|Krakow|Zurich|Geneva|Brussels|Luxembourg|Monaco|Vatican|San\s+Marino|Andorra)/i,
+        /(?:in|to|from)\s+([A-Z][a-z]+\s+(?:City|Beach|Springs|Harbor|Valley|Ridge|Heights|Park|Grove|Village))/i
+      ];
+      
+      for (const pattern of commonCityPatterns) {
+        const match = messageContent.match(pattern);
+        if (match) {
+          cityName = match[1].trim();
+          break;
+        }
+      }
+      
+      // If still false positive, use default
+      if (falsePositives.some(fp => cityName.toLowerCase().includes(fp))) {
+        cityName = 'Barcelona';
+      }
+    }
+    
+    // Get user preferences for banner (same structure as HotelTable)
+    const prefs = userPreferences?.preferences || {};
+    const budget = prefs.budget || 0.33;
+    const quality = prefs.quality || 0.33;
+    const convenience = prefs.convenience || 0.34;
+    const totalWeight = budget + quality + convenience;
+    const budgetPct = totalWeight > 0 ? ((budget / totalWeight) * 100).toFixed(1) : '33.3';
+    const qualityPct = totalWeight > 0 ? ((quality / totalWeight) * 100).toFixed(1) : '33.3';
+    const conveniencePct = totalWeight > 0 ? ((convenience / totalWeight) * 100).toFixed(1) : '33.4';
     
     return (
       <div style={{ margin: '16px 0', padding: '0 24px' }}>
@@ -1544,22 +1852,32 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
             margin: '0',
             fontStyle: 'italic'
           }}>
-            Based on your dates and general preferences.
+            Ranked by how well they match your preferences.
           </p>
         </div>
         
-        {/* Instructions */}
+        {/* Minimal Preference Banner */}
+        {userPreferences && (
         <div style={{
           marginBottom: '16px',
-          padding: '12px 16px',
-          backgroundColor: '#f0f9ff',
-          border: '1px solid #bae6fd',
-          borderRadius: '8px',
-          fontSize: '14px',
-          color: '#004C8C'
+            borderRadius: '12px',
+            backgroundColor: '#E0F2FE',
+            padding: '8px 16px',
+            fontSize: '12px',
+            color: '#1e40af'
         }}>
-          Click an activity name or "Book tour" to add it to your itinerary.
+            Preferences · Budget {budgetPct}% · Quality {qualityPct}% · Convenience {conveniencePct}%
         </div>
+        )}
+        
+        <p style={{
+          fontSize: '14px',
+          color: '#4A4A4A',
+          lineHeight: '1.5',
+          marginBottom: '12px'
+        }}>
+          Here are activity recommendations in {cityName}, sorted by how well they fit your preferences.
+        </p>
         
         {/* Activity Table */}
         <div style={{ overflowX: 'auto' }}>
@@ -1635,6 +1953,31 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                         )}
                         <div style={{ flex: 1 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
+                            {activity.url ? (
+                              <a
+                                href={activity.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ 
+                                  fontWeight: '600', 
+                                  fontSize: '15px',
+                                  color: '#1e40af',
+                                  textDecoration: 'none',
+                                  lineHeight: '1.4'
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.textDecoration = 'underline';
+                                  e.currentTarget.style.color = '#1e3a8a';
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.textDecoration = 'none';
+                                  e.currentTarget.style.color = '#1e40af';
+                                }}
+                              >
+                                {activity.name}
+                              </a>
+                            ) : (
                             <div style={{ 
                               fontWeight: '600', 
                               fontSize: '15px',
@@ -1643,6 +1986,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                             }}>
                               {activity.name}
                             </div>
+                            )}
                             {isSelected && (
                               <span style={{
                                 display: 'inline-block',
@@ -1675,19 +2019,15 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                             </div>
                           )}
                           {activity.description && (
-                            <div style={{ 
+                            <p style={{ 
                               fontSize: '13px', 
                               color: '#64748b',
                               lineHeight: '1.5',
-                              display: '-webkit-box',
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: 'vertical',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              maxHeight: '2.6em'
+                              marginTop: '6px',
+                              marginBottom: '0'
                             }}>
                               {activity.description}
-                            </div>
+                            </p>
                           )}
                         </div>
                       </div>
@@ -1721,54 +2061,47 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                     
                     {/* Booking */}
                     <td style={{ padding: '16px', textAlign: 'center', verticalAlign: 'middle' }}>
-                      {activity.bookingLinks.length > 0 ? (
-                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', flexWrap: 'wrap' }}>
-                          {activity.bookingLinks.map((link, linkIdx) => {
-                            const buttonText = link.provider 
-                              ? `Book on ${link.provider}`
-                              : link.text.includes('Book') 
-                                ? link.text 
-                                : `Book ${activity.name.length > 20 ? 'tour' : activity.name}`;
+                      {(() => {
+                        // Find GetYourGuide link first, then fallback to other booking links or activity URL
+                        const getYourGuideLink = activity.bookingLinks.find(link => 
+                          link.provider === 'GetYourGuide' || link.url.includes('getyourguide')
+                        );
+                        const bookingUrl = getYourGuideLink?.url || 
+                                          activity.bookingLinks[0]?.url || 
+                                          activity.url;
                             
-                            return (
+                        return bookingUrl ? (
                               <a
-                                key={linkIdx}
-                                href={link.url}
+                            href={bookingUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => e.stopPropagation()}
                                 style={{
-                                  color: '#ffffff',
+                              color: '#1e40af',
                                   textDecoration: 'none',
-                                  fontWeight: '600',
-                                  fontSize: '12px',
-                                  padding: '8px 16px',
-                                  backgroundColor: '#00ADEF',
+                              fontSize: '13px',
+                              fontWeight: '500',
+                              padding: '6px 12px',
                                   borderRadius: '6px',
+                              border: '1px solid #1e40af',
                                   display: 'inline-block',
-                                  transition: 'all 0.2s ease',
-                                  boxShadow: '0 2px 4px rgba(0, 173, 239, 0.3)',
-                                  whiteSpace: 'nowrap'
+                              transition: 'all 0.2s ease'
                                 }}
                                 onMouseEnter={(e) => {
-                                  e.target.style.backgroundColor = '#006AAF';
-                                  e.target.style.transform = 'translateY(-1px)';
-                                  e.target.style.boxShadow = '0 4px 8px rgba(0, 173, 239, 0.4)';
+                              e.currentTarget.style.backgroundColor = '#1e40af';
+                              e.currentTarget.style.color = '#ffffff';
                                 }}
                                 onMouseLeave={(e) => {
-                                  e.target.style.backgroundColor = '#00ADEF';
-                                  e.target.style.transform = 'translateY(0)';
-                                  e.target.style.boxShadow = '0 2px 4px rgba(0, 173, 239, 0.3)';
+                              e.currentTarget.style.backgroundColor = 'transparent';
+                              e.currentTarget.style.color = '#1e40af';
                                 }}
                               >
-                                {buttonText}
+                            {getYourGuideLink ? 'Book on GetYourGuide' : 'Book tour'}
                               </a>
-                            );
-                          })}
-                        </div>
                       ) : (
                         <span style={{ color: '#cbd5e1' }}>—</span>
-                      )}
+                        );
+                      })()}
                     </td>
                   </tr>
                 );
@@ -1787,17 +2120,18 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
           textAlign: 'left'
         }}>
           <p style={{ margin: '0 0 8px 0' }}>
-            These activities are popular and can really enhance your time in Barcelona.
+            These activities offer a great taste of {cityName}'s culture, food, and history.
           </p>
           <p style={{ margin: '0' }}>
-            Tell me which ones you like, and I'll add them to your itinerary or find more options.
+            Tell me which ones you'd like to add to your itinerary or if you'd like more options.
           </p>
         </div>
       </div>
     );
   }
   
-  // If it's a hotel table, render as cards (Option A - preferred) or improved table (Option B)
+  // If it's a hotel table, render with summary cards at top and detailed table below
+  // Skip rendering hotel-related markdown content before the table
   if (isHotelTable && rows.length > 1) {
     const headerRow = rows[0];
     const getColumnIndex = (keywords) => {
@@ -1862,116 +2196,508 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       return (a.name || '').localeCompare(b.name || '');
     });
     
-    // Option A: Render as cards (preferred)
-    // Check if message suggests table view (e.g., "Top Recommendations" table)
-    const useTableView = messageContent.toLowerCase().includes('top recommendations') && 
-                         messageContent.toLowerCase().includes('table');
+    // Helper functions for formatting
+    const formatHotelName = (name) => (name || '').replace(/\*\*/g, '').trim();
+    const extractRating = (ratingStr) => {
+      if (!ratingStr) return null;
+      const match = ratingStr.toString().match(/(\d+\.?\d*)\/5/);
+      return match ? parseFloat(match[1]) : null;
+    };
+    const formatPrice = (priceStr) => {
+      if (!priceStr) return null;
+      const match = priceStr.toString().match(/from\s+\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/i) || 
+                   priceStr.toString().match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+      if (match) {
+        return `From $${match[1].replace(/,/g, '')}/night`;
+      }
+      return null;
+    };
+    const formatLocation = (location) => {
+      if (!location) return '';
+      let loc = location.toString().replace(/\*\*/g, '').trim();
+      return loc.replace(/\s*[|•·]\s*/g, ' · ');
+    };
+    const extractDescription = (description) => {
+      if (!description) return '';
+      let desc = description.toString().replace(/\*\*/g, '').trim();
+      const firstSentence = desc.split(/[.!?]/)[0];
+      return firstSentence ? firstSentence + '.' : desc;
+    };
+    const extractBookingLinks = (bookingCell) => {
+      if (!bookingCell) return [];
+      const links = [];
+      const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+      let match;
+      while ((match = linkPattern.exec(bookingCell.toString())) !== null) {
+        const [, text, url] = match;
+        const fullUrl = url.startsWith('http://') || url.startsWith('https://') 
+          ? url 
+          : `https://${url}`;
+        links.push({ text, url: fullUrl });
+      }
+      return links;
+    };
     
-    if (useTableView) {
-      // Option B: Render as improved table with icons
+    // Extract city name and dates from message content
+    const extractCityName = () => {
+      // Try to extract from message content
+      const cityMatch = messageContent.match(/hotels?\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i) ||
+                       messageContent.match(/in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
+      if (cityMatch) return cityMatch[1];
+      
+      // Fallback: try to extract from any location in hotels
+      if (hotels.length > 0 && hotels[0].location) {
+        const loc = hotels[0].location.toString();
+        // Common patterns: "Barcelona", "Gothic Quarter, Barcelona", etc.
+        const cityPattern = /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?:\s*$|,)/;
+        const match = loc.match(cityPattern);
+        if (match) return match[1];
+      }
+      return 'Barcelona'; // Default fallback
+    };
+    
+    const extractDates = () => {
+      // Try to extract dates from message content
+      const datePattern = /(?:from|between)\s+(\d{1,2}\s+\w+\s+\d{4})\s+(?:to|and)\s+(\d{1,2}\s+\w+\s+\d{4})/i;
+      const match = messageContent.match(datePattern);
+      if (match) {
+        return { checkIn: match[1], checkOut: match[2] };
+      }
+      return { checkIn: null, checkOut: null };
+    };
+    
+    const cityName = extractCityName();
+    const { checkIn, checkOut } = extractDates();
+    
+    // Select top 2 hotels for "Top picks" based on rating (desc) and price (asc)
+    // Already sorted by rating desc, price asc, so just take first 2
+    const topPicks = hotels.slice(0, 2);
+    
+    // Get user preferences for personalization
+    const prefs = userPreferences?.preferences || {};
+    const budgetPct = prefs.budget ? (prefs.budget * 100).toFixed(1) : '33.3';
+    const qualityPct = prefs.quality ? (prefs.quality * 100).toFixed(1) : '33.3';
+    const conveniencePct = prefs.convenience ? (prefs.convenience * 100).toFixed(1) : '33.3';
+    
+    // Scroll to hotel row function
+    const scrollToHotel = (hotelName) => {
+      const normalizedName = hotelName.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, '-');
+      const element = document.getElementById(`hotel-row-${normalizedName}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Highlight briefly
+        const originalBg = element.style.backgroundColor;
+        element.style.backgroundColor = '#E8F1FC';
+        setTimeout(() => {
+          element.style.backgroundColor = originalBg;
+        }, 2000);
+      }
+    };
+    
       return (
-        <div key={uniqueKey} style={{ margin: '12px 0', overflowX: 'auto' }}>
+      <div key={uniqueKey} style={{ margin: '16px 0' }}>
+        {/* (1) Main Header Text */}
+        {checkIn && checkOut ? (
+          <p style={{
+            fontSize: '14px',
+            color: '#4A4A4A',
+            lineHeight: '1.5',
+            marginBottom: '20px'
+          }}>
+            Here are hotel options in {cityName} from {checkIn} to {checkOut}, optimized for your Budget, Quality, and Convenience preferences.
+          </p>
+        ) : (
+          <p style={{
+            fontSize: '14px',
+            color: '#4A4A4A',
+            lineHeight: '1.5',
+            marginBottom: '20px'
+          }}>
+            Here are hotel options in {cityName}, optimized for your Budget, Quality, and Convenience preferences.
+          </p>
+        )}
+        
+        {/* (2) Top Picks (0-2 summary cards) */}
+        {topPicks.length > 0 && (
+          <>
+            <h3 style={{
+              fontSize: '16px',
+              fontWeight: '600',
+              color: '#2D6CDF',
+              marginTop: '20px',
+              marginBottom: '12px'
+            }}>
+              Top picks for you
+            </h3>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: topPicks.length === 1 ? '1fr' : 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: '12px',
+              marginBottom: '32px'
+            }}>
+              {topPicks.map((hotel, idx) => {
+                const hotelName = formatHotelName(hotel.name);
+                const rating = extractRating(hotel.rating);
+                const price = formatPrice(hotel.price);
+                const location = formatLocation(hotel.location);
+                
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      backgroundColor: 'white',
+                      border: '1px solid #DADDE2',
+                      borderRadius: '8px',
+                      padding: '12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                    }}
+                  >
+                    {/* Hotel Name with Badge */}
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      marginBottom: '4px',
+                      flexWrap: 'wrap'
+                    }}>
+                    <div style={{
+                      fontWeight: '600',
+                      fontSize: '15px',
+                        color: '#2D6CDF'
+                    }}>
+                      {hotelName}
+                      </div>
+                      {idx === 0 && (
+                        <span style={{
+                          borderRadius: '9999px',
+                          border: '1px solid #DBEAFE',
+                          backgroundColor: '#E0F2FE',
+                          padding: '2px 8px',
+                          fontSize: '11px',
+                          color: '#1e40af',
+                          fontWeight: '500'
+                        }}>
+                          🔥 Best match for you
+                        </span>
+                      )}
+                    </div>
+                    
+                    {/* Rating, Price, Location - Compact chips */}
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                      marginBottom: '8px'
+                    }}>
+                      {rating && (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          fontWeight: '500',
+                          color: '#4A4A4A'
+                        }}>
+                          <span>⭐</span>
+                          <span>{rating}/5</span>
+                        </span>
+                      )}
+                      {price && (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          fontWeight: '500',
+                          color: '#3CB878'
+                        }}>
+                          <span>💰</span>
+                          <span>{price}</span>
+                        </span>
+                      )}
+                      {location && (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          fontWeight: '400',
+                          color: '#4A4A4A'
+                        }}>
+                          <span>📍</span>
+                          <span>{location}</span>
+                        </span>
+                      )}
+                    </div>
+                    
+                    {/* Personalization explanation */}
+                    <p style={{
+                      margin: '0',
+                      marginTop: '4px',
+                      fontSize: '12px',
+                      color: '#64748b',
+                      lineHeight: '1.4'
+                    }}>
+                      {idx === 0 
+                        ? "Best overall match for your preferences."
+                        : "Good value while matching your preferences."}
+                    </p>
+                    
+                    {/* CTA Button - Bottom right */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'auto' }}>
+                      <button
+                        onClick={() => scrollToHotel(hotelName)}
+                        style={{
+                          padding: '6px 14px',
+                          backgroundColor: '#4A90E2',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.target.style.backgroundColor = '#2D6CDF';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.backgroundColor = '#4A90E2';
+                        }}
+                      >
+                        View details & options
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+        
+        {/* (3) Main Recommendations (Single detailed list) */}
+        <h3 style={{
+          fontSize: '18px',
+          fontWeight: '700',
+          color: '#2D6CDF',
+          marginTop: topPicks.length > 0 ? '0' : '16px',
+          marginBottom: '4px'
+        }}>
+          Top recommendations
+        </h3>
+        <p style={{
+          fontSize: '13px',
+          color: '#64748b',
+          marginTop: '0',
+          marginBottom: '8px'
+        }}>
+          Ranked by how well they match your preferences.
+        </p>
+        
+        {/* Minimal Preference Banner */}
+        <div style={{
+          marginBottom: '16px',
+          borderRadius: '12px',
+          backgroundColor: '#E0F2FE',
+          padding: '8px 16px',
+          fontSize: '12px',
+          color: '#1e40af'
+        }}>
+          Preferences · Budget {budgetPct}% · Quality {qualityPct}% · Convenience {conveniencePct}%
+        </div>
+        
+        <p style={{
+          fontSize: '14px',
+          color: '#4A4A4A',
+          lineHeight: '1.5',
+          marginBottom: '12px'
+        }}>
+          Here are hotel recommendations in {cityName}, sorted by how well they fit your preferences.
+        </p>
+        
+        {/* Detailed Table */}
+        <div style={{ marginTop: '12px', overflowX: 'auto' }}>
           <table style={{ 
             width: '100%', 
             borderCollapse: 'collapse', 
             fontSize: '14px',
-            border: '1px solid #e2e8f0',
+            border: '1px solid #DADDE2',
             borderRadius: '8px',
-            overflow: 'hidden'
+            overflow: 'hidden',
+            backgroundColor: 'white'
           }}>
             <thead>
-              <tr style={{ backgroundColor: '#f8fafc' }}>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  🏨 Hotel
+              <tr style={{ backgroundColor: '#F7F9FB' }}>
+                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
+                  Hotel
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  ⭐ Rating
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
+                  Rating
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  💵 Price
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
+                  Price
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  📍 Location
+                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
+                  Location
                 </th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
                   Booking
                 </th>
               </tr>
             </thead>
             <tbody>
               {hotels.map((hotel, idx) => {
-                const hotelName = (hotel.name || '').replace(/\*\*/g, '').trim();
-                const rating = hotel.rating ? hotel.rating.toString().match(/(\d+\.?\d*)\/5/)?.[0] : null;
-                const price = hotel.price ? (() => {
-                  const match = hotel.price.toString().match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
-                  return match ? `$${match[1].replace(/,/g, '')} / night` : null;
-                })() : null;
-                const location = hotel.location ? (() => {
-                  let loc = hotel.location.toString().replace(/\*\*/g, '').trim();
-                  return loc.replace(/\s*[|•·]\s*/g, ' · ');
-                })() : '';
-                const bookingLinks = (() => {
-                  if (!hotel.booking) return [];
-                  const links = [];
-                  const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
-                  let match;
-                  while ((match = linkPattern.exec(hotel.booking.toString())) !== null) {
-                    const [, text, url] = match;
-                    const fullUrl = url.startsWith('http://') || url.startsWith('https://') 
-                      ? url 
-                      : `https://${url}`;
-                    links.push({ text, url: fullUrl });
-                  }
-                  return links;
-                })();
+                const hotelName = formatHotelName(hotel.name);
+                const normalizedName = hotelName.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, '-');
+                const rating = extractRating(hotel.rating);
+                const price = formatPrice(hotel.price);
+                const location = formatLocation(hotel.location);
+                const bookingLinks = extractBookingLinks(hotel.booking);
+                
+                // Find primary booking link (Booking.com) and secondary links
+                const bookingComLink = bookingLinks.find(link => 
+                  link.text.toLowerCase().includes('booking.com') || 
+                  link.url.toLowerCase().includes('booking.com')
+                );
+                const otherLinks = bookingLinks.filter(link => 
+                  !link.text.toLowerCase().includes('booking.com') && 
+                  !link.url.toLowerCase().includes('booking.com')
+                );
+                
+                // Get short location for subtext (first part before comma or separator)
+                const shortLocation = location ? location.split(/[·,|]/)[0].trim() : '';
                 
                 return (
-                  <tr key={idx} style={{ 
-                    backgroundColor: idx % 2 === 0 ? '#ffffff' : '#f8fafc',
-                    borderBottom: idx < hotels.length - 1 ? '1px solid #e2e8f0' : 'none'
-                  }}>
-                    <td style={{ padding: '12px', fontWeight: '600', color: '#004C8C' }}>
+                  <tr 
+                    key={idx} 
+                    id={`hotel-row-${normalizedName}`}
+                    style={{ 
+                      backgroundColor: idx === 0 ? '#E0F2FE' : (idx % 2 === 0 ? '#ffffff' : '#F7F9FB'),
+                      borderBottom: idx < hotels.length - 1 ? '1px solid #DADDE2' : 'none',
+                      transition: 'background-color 0.2s ease',
+                      cursor: 'pointer'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.backgroundColor = '#E8F1FC';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.backgroundColor = idx === 0 ? '#E0F2FE' : (idx % 2 === 0 ? '#ffffff' : '#F7F9FB');
+                    }}
+                  >
+                    <td style={{ padding: '16px 12px', textAlign: 'left' }}>
+                      <div style={{ fontWeight: '600', color: '#4A4A4A', marginBottom: '4px' }}>
                       {hotelName}
+                      </div>
+                      {shortLocation && (
+                        <div style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '400' }}>
+                          {shortLocation}
+                        </div>
+                      )}
                     </td>
-                    <td style={{ padding: '12px', fontWeight: '500', color: '#f59e0b' }}>
-                      {rating || '—'}
+                    <td style={{ padding: '16px 12px', textAlign: 'center' }}>
+                      {rating ? (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontWeight: '500',
+                          color: '#4A4A4A'
+                        }}>
+                          <span>⭐</span>
+                          <span>{rating}/5</span>
+                        </span>
+                      ) : (
+                        <span style={{ color: '#94a3b8' }}>—</span>
+                      )}
                     </td>
-                    <td style={{ padding: '12px', fontWeight: '500', color: '#059669' }}>
-                      {price || '—'}
+                    <td style={{ padding: '16px 12px', textAlign: 'center' }}>
+                      {price ? (
+                        <span style={{
+                          fontWeight: '600',
+                          color: '#3CB878'
+                        }}>
+                          {price.replace(/^From\s+/i, '')}
+                        </span>
+                      ) : (
+                        <span style={{ color: '#94a3b8' }}>—</span>
+                      )}
                     </td>
-                    <td style={{ padding: '12px', fontWeight: '400', color: '#64748b' }}>
-                      {location || '—'}
+                    <td style={{ padding: '16px 12px', textAlign: 'left' }}>
+                      {location ? (
+                        <span style={{
+                          fontWeight: '400',
+                          color: '#4A4A4A',
+                          fontSize: '13px'
+                        }}>
+                          {location}{idx === 0 && (
+                            <span style={{ fontSize: '12px', color: '#64748b', marginLeft: '4px' }}>
+                              · Best match
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span style={{ color: '#94a3b8' }}>—</span>
+                      )}
                     </td>
-                    <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
-                        {bookingLinks.map((link, linkIdx) => (
+                    <td style={{ padding: '16px 12px', textAlign: 'left' }}>
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                        {/* Primary: Booking.com button (filled style) */}
+                        {bookingComLink && (
+                          <a
+                            href={bookingComLink.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              color: 'white',
+                              textDecoration: 'none',
+                              fontWeight: '600',
+                              fontSize: '12px',
+                              padding: '6px 14px',
+                              backgroundColor: '#4A90E2',
+                              border: 'none',
+                              borderRadius: '6px',
+                              display: 'inline-block',
+                              transition: 'all 0.2s ease'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.target.style.backgroundColor = '#2D6CDF';
+                              e.target.style.transform = 'translateY(-1px)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.target.style.backgroundColor = '#4A90E2';
+                              e.target.style.transform = 'translateY(0)';
+                            }}
+                          >
+                            Booking.com
+                          </a>
+                        )}
+                        {/* Secondary: Other booking links (subtle text links) */}
+                        {otherLinks.map((link, linkIdx) => (
                           <a
                             key={linkIdx}
                             href={link.url}
                             target="_blank"
                             rel="noopener noreferrer"
                             style={{
-                              color: '#004C8C',
+                              color: '#4A90E2',
                               textDecoration: 'none',
-                              fontWeight: '500',
+                              fontWeight: '400',
                               fontSize: '12px',
-                              padding: '4px 10px',
-                              backgroundColor: 'transparent',
-                              border: '1px solid #004C8C',
-                              borderRadius: '6px',
-                              display: 'inline-block',
-                              transition: 'all 0.2s ease'
+                              padding: '4px 8px',
+                              transition: 'all 0.2s ease',
+                              borderBottom: '1px solid transparent'
                             }}
                             onMouseEnter={(e) => {
-                              e.target.style.backgroundColor = '#f0f9ff';
-                              e.target.style.borderColor = '#00ADEF';
+                              e.target.style.borderBottomColor = '#4A90E2';
                             }}
                             onMouseLeave={(e) => {
-                              e.target.style.backgroundColor = 'transparent';
-                              e.target.style.borderColor = '#004C8C';
+                              e.target.style.borderBottomColor = 'transparent';
                             }}
                           >
-                            {link.text}
+                            {link.text.includes('Expedia') ? 'Expedia' : link.text.includes('Hotels.com') ? 'Hotels.com' : link.text}
                           </a>
                         ))}
                       </div>
@@ -1982,15 +2708,47 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
             </tbody>
           </table>
         </div>
-      );
-    }
-    
-    // Default: Render as cards (Option A - preferred)
-    return (
-      <div key={uniqueKey} style={{ margin: '8px 0' }}>
-        {hotels.map((hotel, idx) => (
-          <HotelCard key={idx} hotel={hotel} />
-        ))}
+        
+        {/* Footer text */}
+        <div style={{
+          marginTop: '16px',
+          padding: '12px 16px',
+          backgroundColor: '#F7F9FB',
+          borderRadius: '6px',
+          fontSize: '13px',
+          color: '#4A4A4A',
+          lineHeight: '1.5',
+          border: '1px solid #DADDE2'
+        }}>
+          <p style={{ margin: '0 0 4px 0' }}>
+            If you'd like, I can show more options or adjust these results by changing the weight on Budget, Quality, or Convenience.
+          </p>
+          <button
+            onClick={() => {
+              // TODO: Add handler for refine results
+              console.log('Refine results clicked');
+            }}
+            style={{
+              marginTop: '4px',
+              fontSize: '12px',
+              fontWeight: '500',
+              color: '#2563eb',
+              textDecoration: 'underline',
+              background: 'none',
+              border: 'none',
+              padding: '0',
+              cursor: 'pointer'
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.color = '#1e40af';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.color = '#2563eb';
+            }}
+          >
+            Refine these results
+          </button>
+        </div>
       </div>
     );
   }
@@ -2646,32 +3404,66 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
       ? `${depDateDisplay}–${retDateDisplay}` 
       : depDateDisplay || '';
     
+    // Extract airport codes (3 uppercase letters) from origin/destination
+    const extractAirportCode = (text) => {
+      if (!text) return null;
+      const codeMatch = text.toString().match(/\b([A-Z]{3})\b/);
+      return codeMatch ? codeMatch[1] : null;
+    };
+    
+    const originCode = extractAirportCode(firstOrigin) || extractAirportCode(originDisplay) || '';
+    const destCode = extractAirportCode(firstDest) || extractAirportCode(destDisplay) || '';
+    const routeDisplay = originCode && destCode ? `${originCode} → ${destCode}` : '';
+    
+    // Get city names for Step description (remove airport codes if present)
+    const getCityName = (text) => {
+      if (!text) return '';
+      let city = text.toString().trim();
+      // Remove airport codes in parentheses like "Washington D.C. (IAD)"
+      city = city.replace(/\s*\([A-Z]{3}\)\s*$/, '');
+      // Remove standalone airport codes
+      city = city.replace(/\b[A-Z]{3}\b/g, '').trim();
+      return city || text.toString().trim();
+    };
+    
+    const originCity = getCityName(originDisplay) || 'origin';
+    const destCity = getCityName(destDisplay) || 'destination';
+    
     return (
       <div key={uniqueKey} style={{ marginBottom: '24px' }}>
         {/* FlightTableComparison component for modal management */}
         <FlightTableComparison rows={rows} messageContent={messageContent} tableIndex={tableIndex} />
         
-        {/* Description text above table */}
+        {/* Step 1 description */}
+        <div style={{ 
+          marginBottom: '12px',
+          fontSize: '15px',
+          color: '#1e293b',
+          lineHeight: '1.6',
+          fontWeight: '500'
+        }}>
+          <strong style={{ color: '#004C8C' }}>Step 1</strong> — Choose your outbound flight from <strong>{originCode || originCity}</strong> to <strong>{destCode || destCity}</strong>.
+        </div>
+        
+        {/* Section Subtitle */}
+        <h2 style={{ 
+          fontSize: '18px', 
+          fontWeight: '700', 
+          margin: '0 0 8px 0', 
+          color: '#004C8C' 
+        }}>
+          Outbound Flights{routeDisplay ? ` – ${routeDisplay}` : ''}
+        </h2>
+        
+        {/* Description text */}
         <div style={{ 
           marginBottom: '12px',
           fontSize: '14px',
           color: '#64748b',
           lineHeight: '1.5'
         }}>
-          Here are round-trip flight options from <strong style={{ color: '#1e293b' }}>{originDisplay}</strong> to <strong style={{ color: '#1e293b' }}>{destDisplay}</strong>
-          {dateRangeDisplay && <span> (<strong style={{ color: '#1e293b' }}>{dateRangeDisplay}</strong>)</span>}.
-          You can compare duration, layovers, and price side by side.
+          Select your preferred flight below. You can compare options by duration, layovers, and price.
         </div>
-        
-        {/* Section Title */}
-        <h2 style={{ 
-          fontSize: '18px', 
-          fontWeight: '700', 
-          margin: '8px 0 12px 0', 
-          color: '#004C8C' 
-        }}>
-          Outbound Flights
-        </h2>
         
         <div style={{ margin: '8px 0', overflowX: 'auto' }}>
           <table style={{ 
@@ -2687,16 +3479,16 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Price
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Duration
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
-                  Stops/Layover
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
+                  Stops / Layover
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '12px', textAlign: 'right', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Departure
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '12px', textAlign: 'right', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Arrival
                 </th>
                 <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0', width: '90px' }}>
@@ -2705,7 +3497,22 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
               </tr>
             </thead>
             <tbody>
-              {rows.slice(1).map((row, rowIndex) => {
+              {(() => {
+                // First, extract all prices to find the minimum
+                const allPrices = rows.slice(1).map(row => {
+                  if (priceIndex >= 0 && row[priceIndex]) {
+                    const priceStr = row[priceIndex].toString();
+                    const match = priceStr.match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+                    if (match) {
+                      const num = match[1].replace(/,/g, '');
+                      return parseFloat(num);
+                    }
+                  }
+                  return Infinity;
+                });
+                const minPrice = Math.min(...allPrices);
+                
+                return rows.slice(1).map((row, rowIndex) => {
                 const airline = airlineIndex >= 0 && row[airlineIndex] ? row[airlineIndex].toString().trim() : '';
                 const flightCode = flightCodeIndex >= 0 && row[flightCodeIndex] ? row[flightCodeIndex].toString().trim() : '';
                 const price = priceIndex >= 0 && row[priceIndex] ? formatPrice(row[priceIndex]) : '—';
@@ -2716,13 +3523,24 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 
                 // Check if this is the selected flight (first row = selected by default)
                 const isSelected = rowIndex === 0;
+                  
+                  // Extract date from departure for summary
+                  const depDateMatch = departure.match(/(\d{1,2}\s+\w+\s+\d{4})/);
+                  const depDate = depDateMatch ? depDateMatch[1] : '';
+                  
+                  // Check if this is the best (lowest) price
+                  const priceStr = priceIndex >= 0 && row[priceIndex] ? row[priceIndex].toString() : '';
+                  const priceMatch = priceStr.match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+                  const currentPrice = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : Infinity;
+                  const isBestPrice = currentPrice === minPrice && currentPrice !== Infinity;
                 
                 return (
                   <tr key={`${uniqueKey}-row-${rowIndex + 1}`} style={{ 
-                    backgroundColor: isSelected ? '#E6F7FF' : (rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc'),
-                    borderLeft: isSelected ? '4px solid #00ADEF' : 'none',
+                    backgroundColor: isSelected ? '#F0F7FF' : (rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc'),
+                    borderLeft: isSelected ? '4px solid #3A8BFF' : 'none',
                     borderBottom: rowIndex < rows.length - 2 ? '1px solid #e2e8f0' : 'none',
-                    transition: 'background-color 0.2s ease'
+                    transition: 'background-color 0.2s ease',
+                    position: 'relative'
                   }}
                   onMouseEnter={(e) => {
                     if (!isSelected) {
@@ -2733,24 +3551,100 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                     if (!isSelected) {
                       e.currentTarget.style.backgroundColor = rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc';
                     } else {
-                      e.currentTarget.style.backgroundColor = '#E6F7FF';
+                      e.currentTarget.style.backgroundColor = '#F0F7FF';
                     }
                   }}
                   >
-                    {/* Price */}
-                    <td style={{ padding: '12px', verticalAlign: 'top' }}>
-                      <div style={{ marginBottom: '4px', fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
-                        <strong>{airline}</strong>
-                        <br />
-                        <span style={{ fontFamily: 'monospace' }}>{flightCode}</span>
-                      </div>
+                    {/* Price - Simplified */}
+                    <td style={{ 
+                      padding: '12px',
+                      textAlign: 'left',
+                      verticalAlign: 'top',
+                      maxWidth: '150px',
+                      position: 'relative'
+                    }}>
+                      {isSelected && (
+                        <span style={{ 
+                          position: 'absolute',
+                          left: '-4px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          fontSize: '14px',
+                          color: '#3A8BFF',
+                          fontWeight: 'bold'
+                        }}>✓</span>
+                      )}
+                      
+                      {/* Line 1: Price with Best Price badge */}
                       <div style={{ 
                         fontWeight: '700', 
                         color: '#059669',
-                        fontSize: '15px'
+                        fontSize: '20px',
+                        textAlign: 'left',
+                        marginBottom: '8px',
+                        lineHeight: '1.2',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        flexWrap: 'wrap'
                       }}>
-                        {price}
+                        <span>{price}</span>
+                        {isBestPrice && (
+                          <span style={{
+                            fontSize: '9px',
+                            color: '#059669',
+                            fontWeight: '600',
+                            backgroundColor: '#D1FAE5',
+                            padding: '2px 5px',
+                            borderRadius: '3px',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            Best Price
+                          </span>
+                        )}
                       </div>
+                      
+                      {/* Line 2: Airline and Flight Code */}
+                      <div style={{ 
+                        fontSize: '12px', 
+                        color: '#6B7280', 
+                        fontWeight: '400', 
+                        textAlign: 'left',
+                        lineHeight: '1.4',
+                        marginBottom: '4px'
+                      }}>
+                        {airline && flightCode ? (
+                          <span>{airline} <span style={{ fontFamily: 'monospace' }}>{flightCode}</span></span>
+                        ) : (
+                          <>
+                            {airline && <div>{airline}</div>}
+                            {flightCode && <div style={{ fontFamily: 'monospace' }}>{flightCode}</div>}
+                          </>
+                        )}
+                      </div>
+                      
+                      {/* Line 3: Route and Selected text */}
+                      {isSelected && originCode && destCode && (
+                        <div style={{ 
+                          fontSize: '11px', 
+                          color: '#3A8BFF', 
+                          fontWeight: '600', 
+                          textAlign: 'left',
+                          marginTop: '4px'
+                        }}>
+                          Selected outbound flight
+                        </div>
+                      )}
+                      {isSelected && originCode && destCode && depDate && (
+                        <div style={{ 
+                          fontSize: '10px', 
+                          color: '#64748b', 
+                          textAlign: 'left',
+                          marginTop: '2px'
+                        }}>
+                          {originCode} → {destCode} | {depDate}
+                        </div>
+                      )}
                     </td>
                     
                     {/* Duration */}
@@ -2766,7 +3660,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                     {/* Stops/Layover */}
                     <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top' }}>
                       {stops.layoverCodes.length > 0 ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
                           <span style={{
                             backgroundColor: '#fef3c7',
                             color: '#92400e',
@@ -2774,15 +3668,13 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                             borderRadius: '12px',
                             fontSize: '12px',
                             fontWeight: '500',
-                            display: 'inline-block'
+                            display: 'inline-block',
+                            whiteSpace: 'nowrap'
                           }}>
                             {stops.stopText}
                           </span>
-                          <span style={{ fontSize: '11px', color: '#64748b' }}>
-                            via {stops.layoverCodes.map((code, idx) => {
-                              const time = stops.layoverTimes && stops.layoverTimes[idx];
-                              return time ? `${code} (${time})` : code;
-                            }).join(', ')}
+                          <span style={{ fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap' }}>
+                            via {stops.layoverCodes.join(', ')}
                           </span>
                         </div>
                       ) : (
@@ -2846,28 +3738,49 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                     </td>
                   </tr>
                 );
-              })}
+                });
+              })()}
             </tbody>
           </table>
         </div>
         
-        {/* Summary Chip */}
+        {/* Selected Flight Summary */}
         {firstAirline && firstFlightCode && (
           <div style={{
             marginTop: '16px',
-            padding: '10px 16px',
-            backgroundColor: '#f0f9ff',
-            border: '1px solid #00ADEF',
+            padding: '12px 16px',
+            backgroundColor: '#F0F7FF',
+            border: '1px solid #3A8BFF',
             borderRadius: '8px',
-            fontSize: '14px',
-            fontWeight: '500',
-            color: '#004C8C',
-            display: 'inline-block'
+            fontSize: '13px',
+            color: '#1e293b'
           }}>
-            ✈️ {firstOrigin || 'IAD'} → {firstDest || 'BCN'} | {firstDate || '20 Dec'} | {firstPrice || '$1,590.79'} | {firstStops.stopText}{firstStops.layoverCodes.length > 0 ? ` • via ${firstStops.layoverCodes.map((code, idx) => {
-              const time = firstStops.layoverTimes && firstStops.layoverTimes[idx];
-              return time ? `${code} (${time})` : code;
-            }).join(', ')}` : ''}
+            <div style={{ 
+              fontWeight: '600', 
+              color: '#3A8BFF',
+              marginBottom: '6px',
+              fontSize: '14px'
+            }}>
+              Selected outbound flight
+            </div>
+            <div style={{ lineHeight: '1.6' }}>
+              <strong>{firstAirline}</strong> {firstFlightCode && <span style={{ fontFamily: 'monospace' }}>{firstFlightCode}</span>}
+              {firstOrigin && firstDest && (
+                <div style={{ marginTop: '4px', color: '#64748b' }}>
+                  {firstOrigin} → {firstDest}
+                  {firstDate && <span> | {firstDate}</span>}
+                  {firstStops.stopText && <span> | {firstStops.stopText}</span>}
+                  {firstStops.layoverCodes.length > 0 && (
+                    <span> via {firstStops.layoverCodes.join(', ')}</span>
+                  )}
+                </div>
+              )}
+              {firstPrice && (
+                <div style={{ marginTop: '4px', fontWeight: '600', color: '#059669' }}>
+                  {firstPrice}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -3053,32 +3966,71 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
     const firstDate = firstDeparture.match(/(\d{1,2}\s+\w+\s+\d{4})/)?.[1] || '';
     
     // Generate description text for return
+    // For return flights, origin and destination are swapped
     const originDisplay = routeInfo.origin || firstOrigin || 'destination';
     const destDisplay = routeInfo.destination || firstDest || 'origin';
     
+    // Extract airport codes (3 uppercase letters) from origin/destination
+    const extractAirportCode = (text) => {
+      if (!text) return null;
+      const codeMatch = text.toString().match(/\b([A-Z]{3})\b/);
+      return codeMatch ? codeMatch[1] : null;
+    };
+    
+    // For return flights: destination becomes origin, origin becomes destination
+    const returnOriginCode = extractAirportCode(firstDest) || extractAirportCode(destDisplay) || '';
+    const returnDestCode = extractAirportCode(firstOrigin) || extractAirportCode(originDisplay) || '';
+    const returnRouteDisplay = returnOriginCode && returnDestCode ? `${returnOriginCode} → ${returnDestCode}` : '';
+    
+    // Get city names for Step description (remove airport codes if present)
+    const getCityName = (text) => {
+      if (!text) return '';
+      let city = text.toString().trim();
+      // Remove airport codes in parentheses like "Barcelona (BCN)"
+      city = city.replace(/\s*\([A-Z]{3}\)\s*$/, '');
+      // Remove standalone airport codes
+      city = city.replace(/\b[A-Z]{3}\b/g, '').trim();
+      return city || text.toString().trim();
+    };
+    
+    // For return: destination city becomes origin, origin city becomes destination
+    const returnOriginCity = getCityName(destDisplay) || 'destination';
+    const returnDestCity = getCityName(originDisplay) || 'origin';
+    
     return (
-      <div key={uniqueKey} style={{ marginTop: '8px' }}>
+      <div key={uniqueKey} style={{ marginTop: '32px' }}>
         {/* FlightTableComparison component for modal management */}
         <FlightTableComparison rows={rows} messageContent={messageContent} tableIndex={tableIndex} />
         
-        {/* Section Title */}
+        {/* Step 1 description */}
+        <div style={{ 
+          marginBottom: '12px',
+          fontSize: '15px',
+          color: '#1e293b',
+          lineHeight: '1.6',
+          fontWeight: '500'
+        }}>
+          <strong style={{ color: '#004C8C' }}>Step 1</strong> — Choose your outbound flight from <strong>{returnOriginCode || returnOriginCity}</strong> to <strong>{returnDestCode || returnDestCity}</strong>.
+        </div>
+        
+        {/* Section Subtitle */}
         <h2 style={{ 
           fontSize: '18px', 
           fontWeight: '700', 
-          margin: '8px 0 12px 0', 
+          margin: '0 0 8px 0', 
           color: '#004C8C' 
         }}>
-          Return Flights
+          Outbound Flights - {returnOriginCode || returnOriginCity} -> {returnDestCode || returnDestCity}
         </h2>
         
-        {/* Description text above return table */}
+        {/* Description text */}
         <div style={{ 
           marginBottom: '12px',
           fontSize: '14px',
           color: '#64748b',
           lineHeight: '1.5'
         }}>
-          Select your preferred return flight from <strong style={{ color: '#1e293b' }}>{originDisplay}</strong> back to <strong style={{ color: '#1e293b' }}>{destDisplay}</strong>.
+          Once you've chosen both an outbound and a return flight, I can add them to your itinerary or compare a few options in more detail.
         </div>
         
         <div style={{ margin: '8px 0', overflowX: 'auto' }}>
@@ -3113,7 +4065,22 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
               </tr>
             </thead>
             <tbody>
-              {rows.slice(1).map((row, rowIndex) => {
+              {(() => {
+                // First, extract all prices to find the minimum
+                const allPrices = rows.slice(1).map(row => {
+                  if (priceIndex >= 0 && row[priceIndex]) {
+                    const priceStr = row[priceIndex].toString();
+                    const match = priceStr.match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+                    if (match) {
+                      const num = match[1].replace(/,/g, '');
+                      return parseFloat(num);
+                    }
+                  }
+                  return Infinity;
+                });
+                const minPrice = Math.min(...allPrices);
+                
+                return rows.slice(1).map((row, rowIndex) => {
                 const airline = airlineIndex >= 0 && row[airlineIndex] ? row[airlineIndex].toString().trim() : '';
                 const flightCode = flightCodeIndex >= 0 && row[flightCodeIndex] ? row[flightCodeIndex].toString().trim() : '';
                 const price = priceIndex >= 0 && row[priceIndex] ? formatPrice(row[priceIndex]) : '—';
@@ -3125,25 +4092,23 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 // Check if this is the selected flight (first row = selected by default)
                 const isSelected = rowIndex === 0;
                 
+                  // Extract date from departure for summary
+                  const depDateMatch = departure.match(/(\d{1,2}\s+\w+\s+\d{4})/);
+                  const depDate = depDateMatch ? depDateMatch[1] : '';
+                  
+                  // Check if this is the best (lowest) price
+                  const priceStr = priceIndex >= 0 && row[priceIndex] ? row[priceIndex].toString() : '';
+                  const priceMatch = priceStr.match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+                  const currentPrice = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : Infinity;
+                  const isBestPrice = currentPrice === minPrice && currentPrice !== Infinity;
+                
                 return (
-                  <React.Fragment key={`${uniqueKey}-fragment-${rowIndex + 1}`}>
-                    {/* Airline name and flight code above the row */}
-                    {airline && flightCode && (
-                      <tr style={{ backgroundColor: 'transparent', border: 'none' }}>
-                        <td colSpan={6} style={{ padding: '8px 12px 4px 12px', border: 'none', fontSize: '12px', color: '#64748b' }}>
-                          <strong style={{ fontWeight: '600', color: '#1e293b' }}>{airline}</strong>
-                          <br />
-                          <span style={{ fontFamily: 'monospace' }}>{flightCode}</span>
-                        </td>
-                      </tr>
-                    )}
-                    
-                    {/* Data row */}
                     <tr key={`${uniqueKey}-row-${rowIndex + 1}`} style={{ 
-                      backgroundColor: isSelected ? '#E6F7FF' : (rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc'),
-                      borderLeft: isSelected ? '4px solid #00ADEF' : 'none',
+                    backgroundColor: isSelected ? '#F0F7FF' : (rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc'),
+                    borderLeft: isSelected ? '4px solid #3A8BFF' : 'none',
                       borderBottom: rowIndex < rows.length - 2 ? '1px solid #e2e8f0' : 'none',
-                      transition: 'background-color 0.2s ease'
+                    transition: 'background-color 0.2s ease',
+                    position: 'relative'
                     }}
                     onMouseEnter={(e) => {
                       if (!isSelected) {
@@ -3154,19 +4119,100 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       if (!isSelected) {
                         e.currentTarget.style.backgroundColor = rowIndex % 2 === 0 ? '#ffffff' : '#f8fafc';
                       } else {
-                        e.currentTarget.style.backgroundColor = '#E6F7FF';
+                      e.currentTarget.style.backgroundColor = '#F0F7FF';
                       }
                     }}
                     >
-                      {/* Price */}
-                      <td style={{ padding: '12px', verticalAlign: 'top' }}>
+                    {/* Price - Simplified */}
+                    <td style={{ 
+                      padding: '12px',
+                      textAlign: 'left',
+                      verticalAlign: 'top',
+                      maxWidth: '150px',
+                      position: 'relative'
+                    }}>
+                      {isSelected && (
+                        <span style={{ 
+                          position: 'absolute',
+                          left: '-4px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          fontSize: '14px',
+                          color: '#3A8BFF',
+                          fontWeight: 'bold'
+                        }}>✓</span>
+                      )}
+                      
+                      {/* Line 1: Price with Best Price badge */}
                         <div style={{ 
                           fontWeight: '700', 
                           color: '#059669',
-                          fontSize: '15px'
+                        fontSize: '20px',
+                        textAlign: 'left',
+                        marginBottom: '8px',
+                        lineHeight: '1.2',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        flexWrap: 'wrap'
                         }}>
-                          {price}
+                        <span>{price}</span>
+                        {isBestPrice && (
+                          <span style={{
+                            fontSize: '9px',
+                            color: '#059669',
+                            fontWeight: '600',
+                            backgroundColor: '#D1FAE5',
+                            padding: '2px 5px',
+                            borderRadius: '3px',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            Best Price
+                          </span>
+                        )}
                         </div>
+                      
+                      {/* Line 2: Airline and Flight Code */}
+                      <div style={{ 
+                        fontSize: '12px', 
+                        color: '#6B7280', 
+                        fontWeight: '400', 
+                        textAlign: 'left',
+                        lineHeight: '1.4',
+                        marginBottom: '4px'
+                      }}>
+                        {airline && flightCode ? (
+                          <span>{airline} <span style={{ fontFamily: 'monospace' }}>{flightCode}</span></span>
+                        ) : (
+                          <>
+                            {airline && <div>{airline}</div>}
+                            {flightCode && <div style={{ fontFamily: 'monospace' }}>{flightCode}</div>}
+                          </>
+                        )}
+                      </div>
+                      
+                      {/* Line 3: Route and Selected text */}
+                      {isSelected && returnOriginCode && returnDestCode && (
+                        <div style={{ 
+                          fontSize: '11px', 
+                          color: '#3A8BFF', 
+                          fontWeight: '600', 
+                          textAlign: 'left',
+                          marginTop: '4px'
+                        }}>
+                          Selected return flight
+                        </div>
+                      )}
+                      {isSelected && returnOriginCode && returnDestCode && firstDate && (
+                        <div style={{ 
+                          fontSize: '10px', 
+                          color: '#64748b', 
+                          textAlign: 'left',
+                          marginTop: '2px'
+                        }}>
+                          {returnOriginCode} → {returnDestCode} | {firstDate}
+                        </div>
+                      )}
                       </td>
                       
                       {/* Duration */}
@@ -3182,7 +4228,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       {/* Stops/Layover */}
                       <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top' }}>
                         {stops.layoverCodes.length > 0 ? (
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
                             <span style={{
                               backgroundColor: '#fef3c7',
                               color: '#92400e',
@@ -3190,15 +4236,13 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                               borderRadius: '12px',
                               fontSize: '12px',
                               fontWeight: '500',
-                              display: 'inline-block'
+                            display: 'inline-block',
+                            whiteSpace: 'nowrap'
                             }}>
                               {stops.stopText}
                             </span>
-                            <span style={{ fontSize: '11px', color: '#64748b' }}>
-                              via {stops.layoverCodes.map((code, idx) => {
-                                const time = stops.layoverTimes && stops.layoverTimes[idx];
-                                return time ? `${code} (${time})` : code;
-                              }).join(', ')}
+                          <span style={{ fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap' }}>
+                              via {stops.layoverCodes.join(', ')}
                             </span>
                           </div>
                         ) : (
@@ -3261,30 +4305,50 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                         </button>
                       </td>
                     </tr>
-                  </React.Fragment>
                 );
-              })}
+                });
+              })()}
             </tbody>
           </table>
         </div>
         
-        {/* Summary Chip */}
+        {/* Selected Flight Summary */}
         {firstAirline && firstFlightCode && (
           <div style={{
             marginTop: '16px',
-            padding: '10px 16px',
-            backgroundColor: '#f0f9ff',
-            border: '1px solid #00ADEF',
+            padding: '12px 16px',
+            backgroundColor: '#F0F7FF',
+            border: '1px solid #3A8BFF',
             borderRadius: '8px',
-            fontSize: '14px',
-            fontWeight: '500',
-            color: '#004C8C',
-            display: 'inline-block'
+            fontSize: '13px',
+            color: '#1e293b'
           }}>
-            ✈️ {firstOrigin || 'BCN'} → {firstDest || 'IAD'} | {firstDate || '26 Dec'} | {firstPrice || '$1,590.79'} | {firstStops.stopText}{firstStops.layoverCodes.length > 0 ? ` • via ${firstStops.layoverCodes.map((code, idx) => {
-              const time = firstStops.layoverTimes && firstStops.layoverTimes[idx];
-              return time ? `${code} (${time})` : code;
-            }).join(', ')}` : ''}
+            <div style={{ 
+              fontWeight: '600', 
+              color: '#3A8BFF',
+              marginBottom: '6px',
+              fontSize: '14px'
+            }}>
+              Selected return flight
+            </div>
+            <div style={{ lineHeight: '1.6' }}>
+              <strong>{firstAirline}</strong> {firstFlightCode && <span style={{ fontFamily: 'monospace' }}>{firstFlightCode}</span>}
+              {returnOriginCode && returnDestCode && (
+                <div style={{ marginTop: '4px', color: '#64748b' }}>
+                  {returnOriginCode} → {returnDestCode}
+                  {firstDate && <span> | {firstDate}</span>}
+                  {firstStops.stopText && <span> | {firstStops.stopText}</span>}
+                  {firstStops.layoverCodes.length > 0 && (
+                    <span> via {firstStops.layoverCodes.join(', ')}</span>
+                  )}
+                </div>
+              )}
+              {firstPrice && (
+                <div style={{ marginTop: '4px', fontWeight: '600', color: '#059669' }}>
+                  {firstPrice}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -3494,7 +4558,7 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
   );
 }
 
-export default function MessageBubble({ role, content, timestamp, onGenerateItinerary, onSaveTrip }) {
+export default function MessageBubble({ role, content, timestamp, onGenerateItinerary, onSaveTrip, userPreferences }) {
   const isUser = role === 'user';
   
   return (
@@ -3509,7 +4573,7 @@ export default function MessageBubble({ role, content, timestamp, onGenerateItin
         </div>
       )}
       <div className={`bubble ${isUser ? 'bubble-user' : 'bubble-assistant'}`}>
-        {isUser ? content : renderMarkdown(content, onGenerateItinerary, onSaveTrip)}
+        {isUser ? content : renderMarkdown(content, onGenerateItinerary, onSaveTrip, false, userPreferences)}
         {timestamp && <div className="bubble-meta">{timestamp}</div>}
       </div>
     </div>

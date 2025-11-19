@@ -13,7 +13,7 @@ export default function Home() {
             <img src={process.env.PUBLIC_URL + '/sta_tpt_logo.png'} alt="logo" width={48} height={48} />
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
               <span className="brand-name">Wayfinder</span>
-              <span style={{ fontSize: '12px', color: 'var(--muted-foreground)', fontWeight: 400 }}>Plan Smarter. Travel Freer.</span>
+              <span style={{ fontSize: '12px', color: 'var(--muted-foreground)', fontWeight: 400 }}>Plan Smarter.</span>
             </div>
           </div>
           <div className="nav-right">
@@ -31,7 +31,7 @@ export default function Home() {
             <h1 className="hero-title">One conversation,<br/> <span style={{ color: '#00ADEF' }}>optimized travel</span></h1>
             <p className="hero-subtitle">Transform the way you plan trips with our intelligent assistant. Get personalized recommendations for flights, hotels, activities, and dining— all through natural conversation.</p>
             <div style={{ display: 'flex', gap: 12 }}>
-                <button className="btn btn-primary" onClick={() => navigate('/chat')}>Start Planning</button>
+                <button className="btn btn-primary" onClick={() => navigate('/chat', { state: { newTrip: true } })}>Start Planning</button>
                 <button className="btn btn-secondary">Try Demo</button>
             </div>
             <div className="metrics">
@@ -117,7 +117,7 @@ export default function Home() {
               <img src={process.env.PUBLIC_URL + '/sta_tpt_logo.png'} alt="logo" width={32} height={32} />
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                 <span className="brand-name">Wayfinder</span>
-                <span style={{ fontSize: '12px', color: 'var(--muted-foreground)', fontWeight: 400 }}>Plan Smarter. Travel Freer.</span>
+                <span style={{ fontSize: '12px', color: 'var(--muted-foreground)', fontWeight: 400 }}>Plan Smarter.</span>
               </div>
               </div>
               <div className="muted">AI-powered travel planning made simple</div>

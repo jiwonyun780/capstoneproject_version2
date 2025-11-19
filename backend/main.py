@@ -553,7 +553,6 @@ Output:
                 
                 # Add requested dates if available
                 if departure_date:
-                    from datetime import datetime
                     try:
                         dep_date = datetime.strptime(departure_date, "%Y-%m-%d")
                         dep_display = dep_date.strftime("%B %d, %Y")
@@ -561,7 +560,6 @@ Output:
                     except:
                         data_section += f"**Requested Departure Date: {departure_date}**\n"
                 if return_date:
-                    from datetime import datetime
                     try:
                         ret_date = datetime.strptime(return_date, "%Y-%m-%d")
                         ret_display = ret_date.strftime("%B %d, %Y")
@@ -641,7 +639,6 @@ Output:
                                 layover_airport = segments[i].get('arrival', {}).get('airport', '')
                                 if arr_time and dep_time:
                                     try:
-                                        from datetime import datetime
                                         arr_dt = datetime.fromisoformat(arr_time.replace('Z', '+00:00'))
                                         dep_dt = datetime.fromisoformat(dep_time.replace('Z', '+00:00'))
                                         layover_duration = dep_dt - arr_dt
@@ -697,7 +694,6 @@ Output:
                                     layover_airport = segments[i].get('arrival', {}).get('airport', '')
                                     if arr_time and dep_time:
                                         try:
-                                            from datetime import datetime
                                             arr_dt = datetime.fromisoformat(arr_time.replace('Z', '+00:00'))
                                             dep_dt = datetime.fromisoformat(dep_time.replace('Z', '+00:00'))
                                             layover_duration = dep_dt - arr_dt
@@ -874,7 +870,6 @@ Output:
         if has_return_flights:
             data_section += "⚠️ IMPORTANT: This is a ROUND-TRIP flight search. You MUST display BOTH outbound AND return flights separately.\n"
             if departure_date:
-                from datetime import datetime
                 try:
                     dep_date = datetime.strptime(departure_date, "%Y-%m-%d")
                     dep_display = dep_date.strftime("%B %d, %Y")
@@ -882,7 +877,6 @@ Output:
                 except:
                     pass
             if return_date:
-                from datetime import datetime
                 try:
                     ret_date = datetime.strptime(return_date, "%Y-%m-%d")
                     ret_display = ret_date.strftime("%B %d, %Y")
@@ -1481,6 +1475,562 @@ def generateOptimalItinerary(flights: List[Dict[str, Any]], hotels: List[Dict[st
     return result
 
 
+def apply_preference_weights_to_hotels(hotels: List[Dict[str, Any]], preferences: Optional[Dict[str, float]], context_label: str = "chat") -> List[Dict[str, Any]]:
+    """
+    Score and sort hotels using user preference weights.
+    """
+    if not hotels or not preferences:
+        return hotels
+    
+    try:
+        budget_weight = float(preferences.get('budget', 0.33))
+        quality_weight = float(preferences.get('quality', 0.33))
+        convenience_weight = float(preferences.get('convenience', 0.34))
+        total_weight = budget_weight + quality_weight + convenience_weight
+        if total_weight <= 0:
+            budget_weight = quality_weight = convenience_weight = 1 / 3
+        else:
+            budget_weight /= total_weight
+            quality_weight /= total_weight
+            convenience_weight /= total_weight
+        
+        def _safe_float(value):
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped == "":
+                        return None
+                    return float(stripped)
+                return float(value)
+            except (ValueError, TypeError):
+                return None
+        
+        price_values = [_safe_float(h.get('price_per_night') or h.get('price')) for h in hotels]
+        price_values = [p for p in price_values if p is not None]
+        min_price = min(price_values) if price_values else None
+        max_price = max(price_values) if price_values else None
+        
+        distance_values = [_safe_float(h.get('distance')) for h in hotels]
+        distance_values = [d for d in distance_values if d is not None]
+        min_distance = min(distance_values) if distance_values else None
+        max_distance = max(distance_values) if distance_values else None
+        
+        def inverse_normalize(value, min_val, max_val):
+            if value is None or min_val is None or max_val is None or max_val == min_val:
+                return 0.5
+            ratio = (value - min_val) / (max_val - min_val)
+            ratio = max(0.0, min(1.0, ratio))
+            return 1 - ratio
+        
+        for hotel in hotels:
+            price = _safe_float(hotel.get('price_per_night') or hotel.get('price'))
+            rating = _safe_float(hotel.get('rating'))
+            distance = _safe_float(hotel.get('distance'))
+            
+            price_score = inverse_normalize(price, min_price, max_price) if min_price is not None else 0.5
+            rating_value = min(max(rating, 0.0), 5.0) if rating is not None else None
+            rating_score = (rating_value / 5.0) if rating_value is not None else 0.5
+            distance_score = inverse_normalize(distance, min_distance, max_distance) if min_distance is not None else 0.5
+            
+            total_score = (
+                budget_weight * price_score +
+                quality_weight * rating_score +
+                convenience_weight * distance_score
+            )
+            
+            hotel['_preference_score'] = round(total_score, 4)
+            hotel['_preference_components'] = {
+                'price': round(price_score, 4),
+                'rating': round(rating_score, 4),
+                'distance': round(distance_score, 4)
+            }
+        
+        hotels.sort(key=lambda h: h.get('_preference_score', 0), reverse=True)
+        logger.info(
+            "[PREF_SCORING] Applied preference weights to %s hotels (context=%s)",
+            len(hotels),
+            context_label
+        )
+    except Exception as e:
+        logger.error(f"[PREF_SCORING] Failed to apply hotel preference weights ({context_label}): {e}", exc_info=True)
+    
+    return hotels
+
+
+def apply_intent_overrides(message: str, intent_type: str) -> str:
+    """
+    Apply intent overrides to ensure correct routing:
+    - Activity/tour queries → activity_search (GENERAL_ACTIVITIES)
+    - Transfer queries only when clearly about airport↔hotel transfers
+    """
+    text = message.lower()
+    
+    transfer_keywords = [
+        "airport", "terminal", "pick up", "pickup", "drop off", "drop-off",
+        "to the hotel", "from the hotel", "hotel transfer",
+        "private car", "shuttle", "ride", "transfer"
+    ]
+    
+    activity_keywords = [
+        "activity", "activities", "things to do", "fun things to do",
+        "tour", "tours", "day trip", "day trips",
+        "experience", "experiences", "sightseeing"
+    ]
+    
+    # If user talks about activities/tours and NOT clearly about airport transfer → activity_search
+    if any(k in text for k in activity_keywords) and not any(k in text for k in transfer_keywords):
+        logger.info(f"[INTENT_OVERRIDE] Overriding to activity_search (activity keywords found, no transfer keywords)")
+        return "activity_search"
+    
+    # TRANSFER/PRIVATE_CAR should only be kept when transfer keywords are present
+    if intent_type in ("transfer_search", "points_of_interest") and any(k in text for k in transfer_keywords):
+        # Check if it's specifically about airport/hotel transfer
+        if any(k in text for k in ["airport", "hotel", "terminal", "pick up", "drop off"]):
+            logger.info(f"[INTENT_OVERRIDE] Keeping {intent_type} (transfer keywords found)")
+            return intent_type
+        else:
+            # Has transfer keyword but not specifically airport/hotel → treat as activity
+            logger.info(f"[INTENT_OVERRIDE] Overriding {intent_type} to activity_search (transfer keyword but not airport/hotel)")
+            return "activity_search"
+    
+    # If intent is transfer-related but no transfer keywords → change to activity_search
+    if intent_type in ("transfer_search", "points_of_interest") and not any(k in text for k in transfer_keywords):
+        logger.info(f"[INTENT_OVERRIDE] Overriding {intent_type} to activity_search (no transfer keywords)")
+        return "activity_search"
+    
+    return intent_type
+
+
+def apply_preference_filters_to_activities(
+    activities: List[Dict[str, Any]], 
+    preferences: Optional[Dict[str, float]] = None,
+    trip_duration_days: Optional[int] = None,
+    context_label: str = "chat"
+) -> List[Dict[str, Any]]:
+    """
+    Apply preference-based filters, scoring, and sorting to activities:
+    - Trip-length filter: Mark activities longer than trip duration
+    - Budget filter: Mark expensive activities when budget preference is high
+    - Quality filter: Mark low-rated activities when quality preference is high
+    - Scoring: Calculate budget_score, quality_score, convenience_score (0-1 normalized, then multiplied by weights)
+    - Sorting: Sort STRICTLY by total_score (descending), with long_tour items after regular ones
+    
+    Args:
+        activities: List of activity objects (ALL activities in request for normalization)
+        preferences: User preferences dict with budget, quality, convenience weights
+        trip_duration_days: Trip duration in days (optional)
+        context_label: Context for logging
+        
+    Returns:
+        List of activities with filter flags and scores added, sorted by preference
+    """
+    if not activities:
+        return activities
+    
+    # ADD: Check DEBUG mode at function start (os already imported at top level)
+    DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
+    
+    try:
+        def _safe_float(value):
+            """Safely convert value to float"""
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, dict):
+                    return float(value.get('amount', value.get('total', 0)))
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped == "":
+                        return None
+                    return float(stripped)
+                return float(value)
+            except (ValueError, TypeError):
+                return None
+        
+        def _extract_duration_hours(duration_str):
+            """Extract duration in hours from duration string or number"""
+            if duration_str is None:
+                return None
+            
+            # If it's already a number (assume hours)
+            if isinstance(duration_str, (int, float)):
+                return float(duration_str)
+            
+            # If it's a string, try to parse ISO duration format
+            if isinstance(duration_str, str):
+                # ISO 8601 duration format: PT#H#M, P#D, etc.
+                if duration_str.startswith('P'):
+                    # Check for days first (P1D, P2D)
+                    if 'D' in duration_str and 'T' not in duration_str:
+                        try:
+                            days = int(duration_str.replace('P', '').replace('D', ''))
+                            return float(days * 24)  # Convert days to hours
+                        except ValueError:
+                            pass
+                    
+                    # Parse hours and minutes (PT2H30M, PT24H)
+                    if 'T' in duration_str:
+                        time_part = duration_str.split('T')[1]
+                        hours = 0
+                        minutes = 0
+                        if 'H' in time_part:
+                            hours = int(time_part.split('H')[0])
+                        if 'M' in time_part:
+                            minutes = int(time_part.split('M')[0].split('H')[-1] if 'H' in time_part else time_part.split('M')[0])
+                        return hours + minutes / 60.0
+            
+            return None
+        
+        def _extract_duration_days(duration_str):
+            """Extract duration in days from duration string or number"""
+            hours = _extract_duration_hours(duration_str)
+            if hours is None:
+                return None
+            return hours / 24.0
+        
+        # Normalize preferences and log incoming weights
+        if preferences:
+            raw_budget = float(preferences.get('budget', 0.33))
+            raw_quality = float(preferences.get('quality', 0.33))
+            raw_convenience = float(preferences.get('convenience', 0.34))
+            total_weight = raw_budget + raw_quality + raw_convenience
+            
+            logger.info(f"[ACTIVITY_SCORE] ═══ INCOMING PREFERENCES (context={context_label}) ═══")
+            logger.info(f"[ACTIVITY_SCORE] Raw weights: budget={raw_budget:.3f}, quality={raw_quality:.3f}, convenience={raw_convenience:.3f}, total={total_weight:.3f}")
+            
+            if total_weight <= 0:
+                budget_weight = quality_weight = convenience_weight = 1 / 3
+                logger.warning(f"[ACTIVITY_SCORE] Invalid preferences total weight ({total_weight}), using default 1/3 each")
+            else:
+                budget_weight = raw_budget / total_weight
+                quality_weight = raw_quality / total_weight
+                convenience_weight = raw_convenience / total_weight
+            
+            logger.info(f"[ACTIVITY_SCORE] Normalized weights: budget={budget_weight:.3f} ({budget_weight*100:.1f}%), quality={quality_weight:.3f} ({quality_weight*100:.1f}%), convenience={convenience_weight:.3f} ({convenience_weight*100:.1f}%)")
+            
+            # Check for extreme preferences to apply penalties/boosts
+            if budget_weight >= 0.6:
+                logger.info(f"[ACTIVITY_SCORE] 🔴 HIGH BUDGET PREFERENCE ({budget_weight*100:.1f}%) - Will heavily penalize expensive activities")
+            if quality_weight >= 0.6:
+                logger.info(f"[ACTIVITY_SCORE] ⭐ HIGH QUALITY PREFERENCE ({quality_weight*100:.1f}%) - Will aggressively boost high-rated activities")
+            if convenience_weight >= 0.6:
+                logger.info(f"[ACTIVITY_SCORE] 🚀 HIGH CONVENIENCE PREFERENCE ({convenience_weight*100:.1f}%) - Will prioritize shorter duration activities")
+        else:
+            budget_weight = quality_weight = convenience_weight = 1 / 3
+            logger.warning(f"[ACTIVITY_SCORE] ⚠️ No preferences provided (context={context_label}), using default equal weights (1/3 each)")
+        
+        # A. Trip-length filter
+        if trip_duration_days is not None:
+            for activity in activities:
+                duration_str = activity.get('minimumDuration') or activity.get('duration')
+                activity_duration_days = _extract_duration_days(duration_str)
+                
+                if activity_duration_days is not None and activity_duration_days > trip_duration_days:
+                    activity['long_tour'] = True
+                    logger.debug(f"[ACTIVITY_SCORE] Marked '{activity.get('name')}' as long_tour: {activity_duration_days:.1f} days > {trip_duration_days} days")
+                else:
+                    activity['long_tour'] = False
+        else:
+            # If no trip duration, mark all as not long_tour
+            for activity in activities:
+                activity['long_tour'] = False
+        
+        # Collect all metrics for normalization
+        prices = []
+        ratings = []
+        durations = []  # in hours
+        distances = []  # in km (if available)
+        
+        for activity in activities:
+            # Extract price
+            price_info = activity.get('price', {})
+            if isinstance(price_info, dict):
+                price = _safe_float(price_info.get('amount') or price_info.get('total'))
+            else:
+                price = _safe_float(price_info)
+            if price is not None and price >= 0:
+                prices.append(price)
+            
+            # Extract rating
+            rating = _safe_float(activity.get('rating'))
+            if rating is not None and rating >= 0:
+                ratings.append(rating)
+            
+            # Extract duration
+            duration_str = activity.get('minimumDuration') or activity.get('duration')
+            duration_hours = _extract_duration_hours(duration_str)
+            if duration_hours is not None and duration_hours >= 0:
+                durations.append(duration_hours)
+            
+            # Extract distance (if available, from geoCode or distance field)
+            distance = None
+            geo_code = activity.get('geoCode')
+            if geo_code and isinstance(geo_code, dict):
+                # Distance might be in a separate field, or we might need to calculate
+                # For now, we'll use a placeholder - in production, you'd calculate distance from city center
+                pass
+        
+        # Calculate min/max for normalization
+        min_price = min(prices) if prices else None
+        max_price = max(prices) if prices else None
+        
+        min_rating = min(ratings) if ratings else None
+        max_rating = max(ratings) if ratings else None
+        # Default rating range: 0-5
+        if min_rating is None:
+            min_rating = 0.0
+        if max_rating is None:
+            max_rating = 5.0
+        
+        min_duration = min(durations) if durations else None
+        max_duration = max(durations) if durations else None
+        
+        # MODIFY: Normalize to 0-1 range (then multiply by weights)
+        def inverse_normalize(value, min_val, max_val):
+            """Normalize to 0-1, where higher original value = lower score (inverse)"""
+            if value is None or min_val is None or max_val is None or max_val == min_val:
+                return 0.5  # Default middle score
+            ratio = (value - min_val) / (max_val - min_val)
+            ratio = max(0.0, min(1.0, ratio))
+            # Inverse: higher value = lower score (0-1 range)
+            return 1.0 - ratio
+        
+        def forward_normalize(value, min_val, max_val):
+            """Normalize to 0-1, where higher original value = higher score"""
+            if value is None or min_val is None or max_val is None or max_val == min_val:
+                return 0.5  # Default middle score
+            ratio = (value - min_val) / (max_val - min_val)
+            ratio = max(0.0, min(1.0, ratio))
+            return ratio  # 0-1 range
+        
+        # ADD: Log normalization ranges (min/max calculated from ALL activities in request)
+        if DEBUG_MODE:
+            logger.info(f"[ACTIVITY_SCORE] Normalization ranges (for {len(activities)} activities): price=[{min_price}, {max_price}], rating=[{min_rating}, {max_rating}], duration=[{min_duration}, {max_duration}]")
+        
+        # B. Budget filter: Mark expensive activities when budget preference is high (>= 0.6)
+        if preferences:
+            budget_pref = float(preferences.get('budget', 0.33))
+            
+            if budget_pref >= 0.6:
+                if prices:
+                    mean_price = sum(prices) / len(prices)
+                    threshold = mean_price * 1.6
+                    
+                    for activity in activities:
+                        price_info = activity.get('price', {})
+                        if isinstance(price_info, dict):
+                            price = _safe_float(price_info.get('amount') or price_info.get('total'))
+                        else:
+                            price = _safe_float(price_info)
+                        
+                        if price is not None and price > threshold:
+                            activity['too_expensive_for_budget'] = True
+                            logger.debug(f"[ACTIVITY_SCORE] Marked '{activity.get('name')}' as too_expensive: ${price:.2f} > ${threshold:.2f}")
+                        else:
+                            activity['too_expensive_for_budget'] = False
+                else:
+                    for activity in activities:
+                        activity['too_expensive_for_budget'] = False
+            else:
+                for activity in activities:
+                    activity['too_expensive_for_budget'] = False
+        
+        # C. Quality filter: Mark low-rated activities when quality preference is high (>= 0.6)
+        if preferences:
+            quality_pref = float(preferences.get('quality', 0.33))
+            
+            if quality_pref >= 0.6:
+                low_quality_threshold = 3.5
+                
+                for activity in activities:
+                    rating = _safe_float(activity.get('rating'))
+                    
+                    if rating is not None and rating < low_quality_threshold:
+                        activity['low_quality_for_preference'] = True
+                        logger.debug(f"[ACTIVITY_SCORE] Marked '{activity.get('name')}' as low_quality: {rating:.1f} < {low_quality_threshold}")
+                    else:
+                        activity['low_quality_for_preference'] = False
+            else:
+                for activity in activities:
+                    activity['low_quality_for_preference'] = False
+        
+        # D. Calculate scores for each activity
+        for activity in activities:
+            # Extract values
+            price_info = activity.get('price', {})
+            if isinstance(price_info, dict):
+                price = _safe_float(price_info.get('amount') or price_info.get('total'))
+            else:
+                price = _safe_float(price_info)
+            
+            rating = _safe_float(activity.get('rating'))
+            if rating is None:
+                rating = 3.5  # Default rating
+            
+            duration_str = activity.get('minimumDuration') or activity.get('duration')
+            duration_hours = _extract_duration_hours(duration_str)
+            if duration_hours is None:
+                duration_hours = 2.0  # Default 2 hours
+            
+            # MODIFY: Normalize to 0-1 range (then multiply by weights)
+            # Normalize price to 0-1 (inverse: cheaper = higher score)
+            if price is not None and min_price is not None and max_price is not None and max_price > min_price:
+                base_budget_norm = inverse_normalize(price, min_price, max_price)  # 0-1 range
+            elif price is not None:
+                # All prices are the same or only one price
+                base_budget_norm = 0.5
+            else:
+                base_budget_norm = 0.5  # No price data
+            
+            # Normalize rating to 0-1 (forward: higher rating = higher score)
+            base_quality_norm = forward_normalize(rating, 0.0, 5.0)  # 0-1 range
+            
+            # Normalize duration to 0-1 (inverse: shorter = higher score)
+            if min_duration is not None and max_duration is not None and max_duration > min_duration:
+                base_convenience_norm = inverse_normalize(duration_hours, min_duration, max_duration)  # 0-1 range
+            elif duration_hours is not None:
+                base_convenience_norm = 0.5
+            else:
+                base_convenience_norm = 0.5
+            
+            # MODIFY: Apply MUCH STRONGER penalties/boosts for extreme preferences
+            budget_norm = base_budget_norm
+            quality_norm = base_quality_norm
+            convenience_norm = base_convenience_norm
+            
+            if preferences:
+                # Budget-heavy (≥0.6): Dramatically penalize expensive items
+                if budget_weight >= 0.6:
+                    try:
+                        if price is not None and prices and len(prices) > 0 and max_price is not None and min_price is not None:
+                            sorted_prices = sorted(prices)
+                            p50_price = sorted_prices[len(sorted_prices) // 2] if len(sorted_prices) > 1 else sorted_prices[0]
+                            if price > p50_price and max_price > p50_price:
+                                # Scale penalty: 0.5 at median → 0.0 at max (penalty up to 70%)
+                                penalty = min(0.7, 0.5 * ((price - p50_price) / (max_price - p50_price + 0.01)))
+                                budget_norm = max(0.0, base_budget_norm - penalty)
+                                if DEBUG_MODE:
+                                    logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: price=${price:.2f} > median=${p50_price:.2f}, penalty={penalty:.3f}, budget_norm: {base_budget_norm:.3f} → {budget_norm:.3f}")
+                            elif DEBUG_MODE:
+                                logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: price=${price:.2f} <= median=${p50_price:.2f}, budget_norm: {base_budget_norm:.3f} (no penalty)")
+                    except Exception as e:
+                        logger.warning(f"[ACTIVITY_SCORE] Error calculating budget penalty: {e}")
+                
+                # Quality-heavy (≥0.6): Dramatically boost high ratings
+                if quality_weight >= 0.6:
+                    if rating >= 4.5:
+                        # Boost: 0.9 at 4.5 → 1.0 at 5.0 (boost up to 20%)
+                        boost = min(0.2, 0.15 * ((rating - 4.5) / 0.5))
+                        quality_norm = min(1.0, base_quality_norm + boost)
+                        if DEBUG_MODE:
+                            logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: rating={rating:.1f} >= 4.5, boost={boost:.3f}, quality_norm: {base_quality_norm:.3f} → {quality_norm:.3f}")
+                    elif rating < 4.0:
+                        # Penalty: reduce significantly (penalty up to 40%)
+                        penalty = min(0.4, 0.3 * ((4.0 - rating) / 4.0))
+                        quality_norm = max(0.0, base_quality_norm - penalty)
+                        if DEBUG_MODE:
+                            logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: rating={rating:.1f} < 4.0, penalty={penalty:.3f}, quality_norm: {base_quality_norm:.3f} → {quality_norm:.3f}")
+                
+                # Convenience-heavy (≥0.6): Dramatically prioritize short activities
+                if convenience_weight >= 0.6:
+                    try:
+                        if duration_hours is not None and durations and len(durations) > 0 and max_duration is not None and min_duration is not None:
+                            sorted_durations = sorted(durations)
+                            p50_duration = sorted_durations[len(sorted_durations) // 2] if len(sorted_durations) > 1 else sorted_durations[0]
+                            if duration_hours <= p50_duration:
+                                # Boost: shorter = much higher (boost up to 30%)
+                                boost = min(0.3, 0.25 * ((p50_duration - duration_hours) / (p50_duration + 0.1)))
+                                convenience_norm = min(1.0, base_convenience_norm + boost)
+                                if DEBUG_MODE:
+                                    logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: duration={duration_hours:.1f}h <= median={p50_duration:.1f}h, boost={boost:.3f}, convenience_norm: {base_convenience_norm:.3f} → {convenience_norm:.3f}")
+                            else:
+                                # Penalty: longer = much lower (penalty up to 50%)
+                                if max_duration > p50_duration:
+                                    penalty = min(0.5, 0.4 * ((duration_hours - p50_duration) / (max_duration - p50_duration + 0.1)))
+                                    convenience_norm = max(0.0, base_convenience_norm - penalty)
+                                    if DEBUG_MODE:
+                                        logger.debug(f"[ACTIVITY_SCORE] {activity.get('name')[:40]}: duration={duration_hours:.1f}h > median={p50_duration:.1f}h, penalty={penalty:.3f}, convenience_norm: {base_convenience_norm:.3f} → {convenience_norm:.3f}")
+                    except Exception as e:
+                        logger.warning(f"[ACTIVITY_SCORE] Error calculating convenience penalty/boost: {e}")
+            
+            # Calculate total_score: normalized values (0-1) * weights
+            # ALWAYS uses this formula
+            total_score = (
+                budget_norm * budget_weight +
+                quality_norm * quality_weight +
+                convenience_norm * convenience_weight
+            )
+            
+            # Store scores in activity (for backward compatibility, also store 0-100 range)
+            activity['budget_score'] = round(budget_norm * 100, 2)  # 0-100 for display
+            activity['quality_score'] = round(quality_norm * 100, 2)
+            activity['convenience_score'] = round(convenience_norm * 100, 2)
+            activity['total_score'] = round(total_score, 4)  # Keep more precision for sorting
+            
+            # ADD: Debug logging for each activity (only in DEBUG mode)
+            if DEBUG_MODE:
+                logger.info(
+                    f"[ACTIVITY_SCORE] Activity: {activity.get('name')[:50]} | "
+                    f"Raw: price=${price:.2f}, rating={rating:.1f}, duration={duration_hours:.1f}h | "
+                    f"Normalized: budget={budget_norm:.3f}, quality={quality_norm:.3f}, convenience={convenience_norm:.3f} | "
+                    f"Weights: b={budget_weight:.3f}, q={quality_weight:.3f}, c={convenience_weight:.3f} | "
+                    f"Contributions: b*{budget_weight:.3f}={budget_norm*budget_weight:.4f}, q*{quality_weight:.3f}={quality_norm*quality_weight:.4f}, c*{convenience_weight:.3f}={convenience_norm*convenience_weight:.4f} | "
+                    f"Total={total_score:.4f}"
+                )
+        
+        # E. Sort activities STRICTLY by total_score DESC
+        # MODIFY: Separate regular and long_tour activities, sort each group by total_score DESC
+        regular_activities = [a for a in activities if not a.get('long_tour', False)]
+        long_tour_activities = [a for a in activities if a.get('long_tour', False)]
+        
+        # Sort each group by total_score DESC
+        regular_activities.sort(key=lambda x: x.get('total_score', 0), reverse=True)
+        long_tour_activities.sort(key=lambda x: x.get('total_score', 0), reverse=True)
+        
+        # Combine: regular first, then long_tour
+        activities = regular_activities + long_tour_activities
+        
+        # ADD: Log top 10 results with weight influence
+        logger.info(f"[ACTIVITY_SCORE] ═══ SORTING COMPLETE (context={context_label}) ═══")
+        logger.info(f"[ACTIVITY_SCORE] Sorted {len(regular_activities)} regular + {len(long_tour_activities)} long_tour activities")
+        logger.info(f"[ACTIVITY_SCORE] Weights applied: budget={budget_weight:.3f} ({budget_weight*100:.1f}%), quality={quality_weight:.3f} ({quality_weight*100:.1f}%), convenience={convenience_weight:.3f} ({convenience_weight*100:.1f}%)")
+        logger.info(f"[ACTIVITY_SCORE] ═══ TOP 10 ACTIVITIES (by total_score DESC) ═══")
+        
+        top_10 = activities[:10] if len(activities) >= 10 else activities
+        for idx, act in enumerate(top_10, 1):
+            name = act.get('name', 'Unknown')[:50]  # Truncate long names
+            price_val = act.get('price', {}).get('amount') if isinstance(act.get('price'), dict) else act.get('price')
+            rating_val = act.get('rating', 'N/A')
+            duration_val = act.get('minimumDuration') or act.get('duration', 'N/A')
+            budget_s = act.get('budget_score', 0)  # 0-100 range
+            quality_s = act.get('quality_score', 0)  # 0-100 range
+            convenience_s = act.get('convenience_score', 0)  # 0-100 range
+            total_s = act.get('total_score', 0)  # 0-1 range
+            
+            # Calculate weighted contributions (using 0-1 normalized values)
+            budget_contrib = (budget_s / 100.0) * budget_weight
+            quality_contrib = (quality_s / 100.0) * quality_weight
+            convenience_contrib = (convenience_s / 100.0) * convenience_weight
+            
+            logger.info(
+                f"[ACTIVITY_SCORE] #{idx}: {name} | "
+                f"total_score={total_s:.4f} | "
+                f"budget={budget_s:.1f}*{budget_weight:.3f}={budget_contrib:.4f} | "
+                f"quality={quality_s:.1f}*{quality_weight:.3f}={quality_contrib:.4f} | "
+                f"convenience={convenience_s:.1f}*{convenience_weight:.3f}={convenience_contrib:.4f} | "
+                f"Raw: price=${price_val} rating={rating_val} duration={duration_val}"
+            )
+        
+        logger.info(f"[ACTIVITY_SCORE] ═══ END SCORING REPORT ═══")
+        
+    except Exception as e:
+        logger.error(f"[ACTIVITY_SCORE] Failed to score activities ({context_label}): {e}", exc_info=True)
+    
+    return activities
+
+
 # ==================== AIRLINE API ENDPOINTS ====================
 
 @app.get("/api/amadeus/airline/lookup")
@@ -1905,6 +2455,9 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
                     
                     if not hotel_result.get('error') and hotel_result.get('hotels'):
                         hotels = hotel_result['hotels'][:20]  # Limit to 20 hotels
+                        request_preferences = req.get('preferences')
+                        if request_preferences:
+                            hotels = apply_preference_weights_to_hotels(hotels, request_preferences, context_label="fetch_itinerary")
                         logger.info(f"[ITINERARY_DATA] Found {len(hotels)} hotels")
                     else:
                         logger.warn(f"[ITINERARY_DATA] Hotel search returned error or no hotels: {hotel_result.get('error', 'No hotels found')}")
@@ -1947,6 +2500,34 @@ async def fetch_itinerary_data(req: Dict[str, Any]):
                     
                     if not activity_result.get('error') and activity_result.get('activities'):
                         activities = activity_result['activities'][:30]  # Limit to 30 activities
+                        
+                        # Apply preference filters to activities
+                        # Calculate trip duration from check_in/check_out
+                        trip_duration_days = None
+                        if check_in and check_out:
+                            try:
+                                check_in_dt = datetime.strptime(check_in, "%Y-%m-%d")
+                                check_out_dt = datetime.strptime(check_out, "%Y-%m-%d")
+                                trip_duration_days = (check_out_dt - check_in_dt).days
+                            except (ValueError, TypeError) as date_error:
+                                logger.debug(f"[ITINERARY_DATA] Could not parse dates for trip duration: {date_error}")
+                        
+                        # Get preferences from request
+                        request_preferences = req.get('preferences')
+                        
+                        # Apply filters
+                        activities = apply_preference_filters_to_activities(
+                            activities,
+                            preferences=request_preferences,
+                            trip_duration_days=trip_duration_days,
+                            context_label="fetch_itinerary"
+                        )
+                        
+                        # Generate fixed header template for activities
+                        destination_city = destination_name or destination_code or "your destination"
+                        activity_result['_header_title'] = f"Top activities in {destination_city}"
+                        activity_result['_subtitle'] = "Ranked by how well they match your preferences."
+                        
                         logger.info(f"[ITINERARY_DATA] Found {len(activities)} activities")
         except Exception as e:
             logger.error(f"[ITINERARY_DATA] Error fetching activities: {e}")
@@ -2055,12 +2636,20 @@ async def optimize_trip(preferences: TripPreferences):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     try:
-        # Log received preferences
-        logger.info(f"[MAIN] /api/chat received request with preferences: {req.preferences}")
+        # ADD: End-to-end trace of preferences from FE → BE
+        logger.info(f"[PREF_TRACE] ═══ PREFERENCES FLOW TRACE (FE → BE) ═══")
+        logger.info(f"[PREF_TRACE] Received request with preferences: {req.preferences}")
         if req.preferences:
-            logger.info(f"[MAIN] Preferences type: {type(req.preferences)}, content: {req.preferences}")
+            logger.info(f"[PREF_TRACE] Preferences type: {type(req.preferences)}, keys: {list(req.preferences.keys()) if isinstance(req.preferences, dict) else 'N/A'}")
+            logger.info(f"[PREF_TRACE] Raw values: budget={req.preferences.get('budget')}, quality={req.preferences.get('quality')}, convenience={req.preferences.get('convenience')}")
+            if isinstance(req.preferences, dict):
+                raw_budget = req.preferences.get('budget', 0)
+                raw_quality = req.preferences.get('quality', 0)
+                raw_convenience = req.preferences.get('convenience', 0)
+                total_raw = raw_budget + raw_quality + raw_convenience
+                logger.info(f"[PREF_TRACE] Sum check: {raw_budget:.3f} + {raw_quality:.3f} + {raw_convenience:.3f} = {total_raw:.3f}")
         else:
-            logger.warning(f"[MAIN] ⚠️ No preferences in request!")
+            logger.warning(f"[PREF_TRACE] ⚠️ No preferences in request body!")
         
         # Validate that we have messages
         if not req.messages or len(req.messages) == 0:
@@ -2103,6 +2692,22 @@ async def chat(req: ChatRequest):
         # Use intent detection for proper parsing
         logger.info(f"Processing message for session {session_id}: {user_message[:100]}...")
         
+        # Extract context variables from request
+        now_iso = req.context.now_iso if req.context else None
+        user_tz = req.context.user_tz if req.context else None
+        user_location_obj = req.context.user_location if req.context else None
+        
+        # Convert Pydantic model to dict for intent detector
+        user_location = None
+        if user_location_obj:
+            user_location = {
+                'city': user_location_obj.city if hasattr(user_location_obj, 'city') else None,
+                'region': user_location_obj.region if hasattr(user_location_obj, 'region') else None,
+                'country': user_location_obj.country if hasattr(user_location_obj, 'country') else None,
+                'lat': user_location_obj.lat if hasattr(user_location_obj, 'lat') else None,
+                'lon': user_location_obj.lon if hasattr(user_location_obj, 'lon') else None
+            }
+        
         # Detect intent using the intent detector
         if intent_detector:
             try:
@@ -2112,9 +2717,21 @@ async def chat(req: ChatRequest):
                     'user_tz': user_tz,
                     'user_location': user_location
                 }
-                intent = await intent_detector.analyze_message(user_message, req.messages, context)
-                logger.info(f"Intent detection result: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
-                logger.info(f"Extracted parameters: {intent['params']}")
+                raw_intent_data = await intent_detector.analyze_message(user_message, req.messages, context)
+                logger.info(f"Raw intent detection result: type={raw_intent_data['type']}, confidence={raw_intent_data['confidence']}, has_required_params={raw_intent_data['has_required_params']}")
+                logger.info(f"Extracted parameters: {raw_intent_data['params']}")
+                
+                # Apply intent overrides to ensure correct routing
+                raw_intent_type = raw_intent_data['type']
+                final_intent_type = apply_intent_overrides(user_message, raw_intent_type)
+                
+                # Update intent type if override was applied
+                if final_intent_type != raw_intent_type:
+                    logger.info(f"[INTENT_OVERRIDE] Changed intent from '{raw_intent_type}' to '{final_intent_type}'")
+                    raw_intent_data['type'] = final_intent_type
+                
+                intent = raw_intent_data
+                logger.info(f"Final intent after overrides: type={intent['type']}, confidence={intent['confidence']}, has_required_params={intent['has_required_params']}")
                 
                 # Check conversation context to override incorrect intent detection
                 # Priority: If activity keywords are present OR previous context is about activities
@@ -2285,7 +2902,6 @@ async def chat(req: ChatRequest):
             if origin and destination and departure_date and amadeus_service:
                 try:
                     # Validate dates before API call
-                    from datetime import datetime
                     try:
                         parsed_date = datetime.strptime(departure_date, "%Y-%m-%d")
                         if parsed_date < datetime.now():
@@ -2616,9 +3232,19 @@ async def chat(req: ChatRequest):
                             radius=intent["params"].get("radius", 50),
                             price_range=intent["params"].get("price_range")
                         )
+                        if amadeus_data and amadeus_data.get('hotels') and req.preferences:
+                            amadeus_data['hotels'] = apply_preference_weights_to_hotels(
+                                amadeus_data['hotels'],
+                                req.preferences,
+                                context_label="chat"
+                            )
+                            amadeus_data['_preference_weights'] = req.preferences
                         logger.info(f"Amadeus hotel search returned count={(amadeus_data or {}).get('count')}")
                     elif intent["type"] == "activity_search":
                         logger.info(f"Calling activity search with params: {intent['params']}")
+                        # ADD: Log preferences before activity search
+                        logger.info(f"[PREF_TRACE] Activity search detected. Preferences for scoring: {req.preferences}")
+                        
                         if "latitude" in intent["params"] and "longitude" in intent["params"]:
                             # Direct coordinate search
                             amadeus_data = amadeus_service.search_activities(
@@ -2629,23 +3255,75 @@ async def chat(req: ChatRequest):
                         elif "destination" in intent["params"]:
                             # City-based search - convert city name to coordinates
                             city_name = intent["params"]["destination"]
-                            logger.info(f"Converting city name '{city_name}' to coordinates")
+                            logger.info(f"[ACTIVITY_SEARCH] Converting city name '{city_name}' to coordinates")
                             coordinates = amadeus_service.get_city_coordinates(city_name)
                             
                             if coordinates:
                                 lat, lon = coordinates
-                                logger.info(f"Found coordinates for {city_name}: {lat}, {lon}")
+                                logger.info(f"[ACTIVITY_SEARCH] Found coordinates for {city_name}: {lat}, {lon}")
                                 amadeus_data = amadeus_service.search_activities(
                                     latitude=lat,
                                     longitude=lon,
                                     radius=intent["params"].get("radius", 1)
                                 )
                             else:
-                                logger.warning(f"Could not find coordinates for city: {city_name}")
+                                logger.error(f"[ACTIVITY_SEARCH] Could not find coordinates for city: {city_name}")
+                                logger.error(f"[ACTIVITY_SEARCH] Intent params: {intent.get('params')}")
                                 amadeus_data = {"error": f"Could not find location coordinates for {city_name}"}
                         else:
                             logger.warning("Activity search requires coordinates or destination city")
                             amadeus_data = {"error": "Activity search requires location coordinates or a destination city name"}
+                        
+                        # Apply preference filters to activities
+                        if amadeus_data and amadeus_data.get('activities'):
+                            # ADD: Log before passing to scoring function
+                            logger.info(f"[PREF_TRACE] Passing {len(amadeus_data['activities'])} activities to scoring function with preferences: {req.preferences}")
+                            
+                            # Calculate trip duration from dates if available
+                            trip_duration_days = None
+                            
+                            # Try to get dates from intent params (check_in/check_out or departure_date/return_date)
+                            check_in = intent["params"].get("check_in")
+                            check_out = intent["params"].get("check_out")
+                            departure_date = intent["params"].get("departure_date")
+                            return_date = intent["params"].get("return_date")
+                            
+                            try:
+                                if check_in and check_out:
+                                    check_in_dt = datetime.strptime(check_in, "%Y-%m-%d")
+                                    check_out_dt = datetime.strptime(check_out, "%Y-%m-%d")
+                                    trip_duration_days = (check_out_dt - check_in_dt).days
+                                elif departure_date and return_date:
+                                    dep_dt = datetime.strptime(departure_date, "%Y-%m-%d")
+                                    ret_dt = datetime.strptime(return_date, "%Y-%m-%d")
+                                    trip_duration_days = (ret_dt - dep_dt).days
+                            except (ValueError, TypeError) as date_error:
+                                logger.debug(f"[ACTIVITY_FILTER] Could not parse dates for trip duration: {date_error}")
+                            
+                            # Apply filters and scoring
+                            logger.info(f"[ACTIVITY_SEARCH] Applying preference filters. Activities count before: {len(amadeus_data['activities'])}, preferences: {req.preferences}")
+                            amadeus_data['activities'] = apply_preference_filters_to_activities(
+                                amadeus_data['activities'],
+                                preferences=req.preferences,
+                                trip_duration_days=trip_duration_days,
+                                context_label="chat"
+                            )
+                            logger.info(f"[ACTIVITY_SEARCH] After preference filtering. Activities count: {len(amadeus_data['activities'])}")
+                            
+                            if req.preferences:
+                                amadeus_data['_preference_weights'] = req.preferences
+                                logger.info(f"[ACTIVITY_SEARCH] Preference weights saved: {req.preferences}")
+                            else:
+                                logger.warning(f"[ACTIVITY_SEARCH] ⚠️ No preferences in request! req.preferences = {req.preferences}")
+                            if trip_duration_days is not None:
+                                amadeus_data['_trip_duration_days'] = trip_duration_days
+                            
+                            # Generate fixed header template (not from GPT)
+                            destination_city = intent["params"].get("destination", "your destination")
+                            amadeus_data['_header_title'] = f"Top activities in {destination_city}"
+                            amadeus_data['_subtitle'] = "Ranked by how well they match your preferences."
+                        
+                        logger.info(f"Amadeus activity search returned count={(amadeus_data or {}).get('count')}")
                     elif intent["type"] == "flight_inspiration":
                         logger.info(f"Calling flight inspiration with params: {intent['params']}")
                         amadeus_data = amadeus_service.get_flight_inspiration(
@@ -2691,13 +3369,53 @@ async def chat(req: ChatRequest):
                         logger.info(f"Amadeus airport performance returned")
                     elif intent["type"] == "points_of_interest":
                         logger.info(f"Calling points of interest with params: {intent['params']}")
+                        # For GENERAL_ACTIVITIES or general activity searches, use activity_search API instead
+                        # This avoids PRIVATE_CAR category restriction and uses the standard activities API
+                        if "latitude" in intent["params"] and "longitude" in intent["params"]:
+                            # Use activity_search API instead of points_of_interest for general activities
+                            amadeus_data = amadeus_service.search_activities(
+                                latitude=float(intent["params"]["latitude"]),
+                                longitude=float(intent["params"]["longitude"]),
+                                radius=intent["params"].get("radius", 1)
+                            )
+                            # Generate fixed header template (use destination if available, otherwise generic)
+                            if amadeus_data and not amadeus_data.get('error'):
+                                destination_city = intent["params"].get("destination", "your destination")
+                                amadeus_data['_header_title'] = f"Top activities in {destination_city}"
+                                amadeus_data['_subtitle'] = "Ranked by how well they match your preferences."
+                            logger.info(f"Using activity_search API instead of points_of_interest (GENERAL_ACTIVITIES)")
+                        elif "destination" in intent["params"]:
+                            # City-based search - convert city name to coordinates
+                            city_name = intent["params"]["destination"]
+                            logger.info(f"Converting city name '{city_name}' to coordinates for activity search")
+                            coordinates = amadeus_service.get_city_coordinates(city_name)
+                            
+                            if coordinates:
+                                lat, lon = coordinates
+                                logger.info(f"Found coordinates for {city_name}: {lat}, {lon}")
+                                amadeus_data = amadeus_service.search_activities(
+                                    latitude=lat,
+                                    longitude=lon,
+                                    radius=intent["params"].get("radius", 1)
+                                )
+                            else:
+                                logger.warning(f"Could not find coordinates for city: {city_name}")
+                                amadeus_data = {"error": f"Could not find location coordinates for {city_name}"}
+                        else:
+                            # Fallback to original points_of_interest API (but exclude PRIVATE_CAR)
+                            categories = intent["params"].get("categories", [])
+                            if isinstance(categories, str):
+                                categories = [c.strip() for c in categories.split(",")]
+                            # Exclude PRIVATE_CAR category
+                            if categories:
+                                categories = [c for c in categories if c.upper() != "PRIVATE_CAR"]
                         amadeus_data = amadeus_service.get_points_of_interest(
                             latitude=float(intent["params"].get("latitude", 0)),
                             longitude=float(intent["params"].get("longitude", 0)),
                             radius=intent["params"].get("radius", 2),
-                            categories=intent["params"].get("categories")
+                                categories=categories if categories else None
                         )
-                        logger.info(f"Amadeus points of interest returned count={(amadeus_data or {}).get('count')}")
+                        logger.info(f"Amadeus activity search returned count={(amadeus_data or {}).get('count')}")
                     elif intent["type"] == "most_booked_destinations":
                         logger.info(f"Calling most booked destinations with params: {intent['params']}")
                         amadeus_data = amadeus_service.get_flight_most_booked_destinations(

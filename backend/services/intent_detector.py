@@ -93,6 +93,17 @@ Intent types:
 - location_search: User wants to find airport/city codes
 - general: General travel conversation without specific API needs
 
+CRITICAL INTENT DETECTION PRIORITY (MUST FOLLOW IN ORDER):
+1. If message contains "activities", "activity", "things to do", "tours", "attractions", "sightseeing" → activity_search (HIGHEST PRIORITY)
+   Examples:
+   * "Please search for activities from X to Y" → activity_search
+   * "activities in Paris" → activity_search
+   * "things to do in Tokyo" → activity_search
+   * "tours in Barcelona" → activity_search
+2. If message contains "hotels", "hotel", "accommodation", "lodging", "stay" → hotel_search
+3. If message contains "flights", "flight", "fly", "airline", "travel by plane" → flight_search
+4. Otherwise, use context from conversation history or infer from structure
+
 Required parameters by type:
 - flight_search: origin, destination, departure_date
 - hotel_search: destination (as city), check_in, check_out  
@@ -104,15 +115,23 @@ IMPORTANT for activity_search:
 - If user provides a city name (e.g., "activities in Paris", "things to do in Barcelona"), use "destination" parameter
 - If user provides coordinates, use "latitude" and "longitude" parameters
 - Both are valid - the system will handle city name to coordinate conversion automatically
+- For "activities from X to Y" format: Y is the destination (where activities will be searched)
+- For "activities in X" format: X is the destination
+- Examples:
+  * "activities from Washington DC to Paris" → destination: "Paris" (activities are searched in Paris)
+  * "activities in Barcelona" → destination: "Barcelona"
+  * "things to do in Tokyo" → destination: "Tokyo"
 
 SPECIAL PARSING RULES:
 - For "flights to X to Y" format: X is the origin, Y is the destination
-- For "from X to Y" format: X is the origin, Y is the destination
-- For "X to Y" format: X is the origin, Y is the destination
+- For "from X to Y" format (for flights): X is the origin, Y is the destination
+- For "X to Y" format (for flights): X is the origin, Y is the destination
+- For "activities from X to Y" format: Y is the destination (where to search activities)
 - Examples:
   * "flights to Washington DC to Barcelona" → origin: "Washington DC", destination: "Barcelona"
-  * "from New York to Paris" → origin: "New York", destination: "Paris"
-  * "Tokyo to London" → origin: "Tokyo", destination: "London"
+  * "from New York to Paris" (flight context) → origin: "New York", destination: "Paris"
+  * "activities from Washington DC to Paris" → destination: "Paris" (for activity search)
+  * "Tokyo to London" (flight context) → origin: "Tokyo", destination: "London"
 
 Extract dates in YYYY-MM-DD format. Convert relative dates like "tomorrow", "next week" to actual dates.
 For cities/airports, use full city names (e.g., "Washington DC", "Barcelona", "New York").
@@ -132,16 +151,22 @@ IMPORTANT: If no specific date is mentioned, use reasonable defaults:
 - For activities: use current date
 
 CRITICAL CONTEXT AWARENESS RULES:
-- ALWAYS check conversation history first - previous messages provide crucial context
+- ALWAYS check for explicit keywords FIRST (see PRIORITY rules above)
+- If message explicitly says "activities", "activity", "things to do" → MUST be activity_search (no exceptions)
+- ALWAYS check conversation history - previous messages provide crucial context
 - If previous messages discuss activities, tours, attractions, or things to do → activity_search context
 - If previous messages discuss flights or travel routes → flight_search context  
 - If previous messages discuss hotels or accommodations → hotel_search context
 - When user says "guided tour", "tour", "activity", "things to do" AFTER discussing activities → activity_search
 - When user says "under $X", "below $X", "cheap", "budget" for tours/activities → activity_search with max_price
-- ONLY use flight_search if user explicitly mentions "flight", "fly", "airline", or route ("from X to Y")
-- Do NOT assume flight_search just because of words like "to", "from", "under" when context is clearly about activities
+- ONLY use flight_search if user explicitly mentions "flight", "fly", "airline", or route ("from X to Y") AND no activity keywords
+- Do NOT assume flight_search just because of words like "to", "from", "under" when message contains "activities" or "activity"
+- "Please search for activities from X to Y" → ALWAYS activity_search (the word "activities" overrides everything)
 - If user refines a previous search (e.g., "guided tour under $20" after activities list) → same intent as previous message
 - Examples:
+  * "Please search for activities from Washington DC to Paris" → activity_search (NOT flight_search)
+  * "activities in Barcelona" → activity_search
+  * "things to do in Tokyo" → activity_search
   * Previous: "activities in Barcelona" + Current: "guided tour under $20" → activity_search (NOT flight_search)
   * Previous: "activities in Barcelona" + Current: "cheap options" → activity_search (NOT flight_search)
   * Previous: "Top activities" + Current: "under $20" → activity_search (NOT flight_search)
@@ -149,7 +174,7 @@ CRITICAL CONTEXT AWARENESS RULES:
 Return only the JSON object, no other text."""
 
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are a travel intent detection system. Analyze messages and return structured JSON data only."},
                     {"role": "user", "content": prompt}
@@ -172,10 +197,15 @@ Return only the JSON object, no other text."""
             # Validate and clean the response
             intent_data = self._validate_intent_data(intent_data)
             
+            # Override intent classification for activities/transfers
+            raw = intent_data["type"]
+            fixed = self._apply_intent_overrides(message, raw)
+            intent_data["type"] = fixed
+            
             # Post-process to convert city names to IATA codes and parse dates
             intent_data = self._post_process_intent(intent_data)
             
-            logger.info(f"Intent detected: {intent_data['type']} (confidence: {intent_data['confidence']})")
+            logger.info(f"Intent detected: {intent_data['type']} (was raw={raw}, confidence: {intent_data['confidence']})")
             return intent_data
             
         except json.JSONDecodeError as e:
@@ -184,6 +214,43 @@ Return only the JSON object, no other text."""
         except Exception as e:
             logger.error(f"Intent detection failed: {e}")
             return self._get_fallback_intent(message)
+    
+    def _apply_intent_overrides(self, message: str, raw_intent: str) -> str:
+        """
+        Override logic to prevent airport-transfer results unless user explicitly asks.
+        
+        Args:
+            message: User's message text
+            raw_intent: Raw intent type from LLM
+            
+        Returns:
+            Overridden intent type (activity_search for general activities, original intent for transfers)
+        """
+        text = message.lower()
+        
+        # Keywords that mean the user REALLY wants a transfer
+        transfer_keywords = [
+            "airport", "terminal", "pickup", "pick up", "dropoff", "drop off",
+            "shuttle", "transfer", "ride to the airport", "from airport", "to the airport"
+        ]
+        
+        # Keywords meaning "normal activities"
+        activity_keywords = [
+            "activity", "activities", "things to do", "tour", "tours",
+            "day trip", "sightseeing", "fun", "museum", "park",
+        ]
+        
+        # If user mentions activities and NOT transfers → force activity_search
+        if any(k in text for k in activity_keywords) and not any(k in text for k in transfer_keywords):
+            logger.info(f"[INTENT_OVERRIDE] Overriding to activity_search (activity keywords found, no transfer keywords)")
+            return "activity_search"
+        
+        # If intent was classified as transfer, but user didn't mention transfer keywords → override
+        if raw_intent in ["transfer", "private_car", "transfer_search", "points_of_interest"] and not any(k in text for k in transfer_keywords):
+            logger.info(f"[INTENT_OVERRIDE] Overriding {raw_intent} to activity_search (no transfer keywords)")
+            return "activity_search"
+        
+        return raw_intent
     
     def _validate_intent_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and clean intent detection data"""

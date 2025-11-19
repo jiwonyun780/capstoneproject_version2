@@ -5,6 +5,7 @@ import os
 import httpx
 import requests
 import logging
+import re
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import json
@@ -317,7 +318,7 @@ class AmadeusService:
             logger.error(f"[AMADEUS] Hotel offer pricing failed: {e}", exc_info=True)
             return {"error": str(e), "offer": None}
     
-    def search_activities(self, latitude: float, longitude: float, radius: int = 1) -> Dict[str, Any]:
+    def search_activities(self, latitude: float, longitude: float, radius: int = 1, include_multi_day: bool = False) -> Dict[str, Any]:
         """
         Search for activities near coordinates
         API: /v1/shopping/activities
@@ -326,6 +327,7 @@ class AmadeusService:
             latitude: Latitude (decimal coordinates)
             longitude: Longitude (decimal coordinates)
             radius: Search radius in kilometers (0-20, default 1)
+            include_multi_day: If True, include multi-day tours (default: False)
         """
         params = {
             "latitude": latitude,
@@ -335,12 +337,12 @@ class AmadeusService:
         
         try:
             response = self._make_request("/v1/shopping/activities", params)
-            return self._format_activity_response(response)
+            return self._format_activity_response(response, include_multi_day=include_multi_day)
         except Exception as e:
             logger.error(f"Activity search failed: {e}")
             return {"error": str(e), "activities": []}
     
-    def search_activities_by_square(self, north: float, south: float, east: float, west: float) -> Dict[str, Any]:
+    def search_activities_by_square(self, north: float, south: float, east: float, west: float, include_multi_day: bool = False) -> Dict[str, Any]:
         """
         Search for activities within a bounding box
         API: /v1/shopping/activities/by-square
@@ -350,6 +352,7 @@ class AmadeusService:
             south: Latitude south of bounding box (decimal coordinates)
             east: Longitude east of bounding box (decimal coordinates)
             west: Longitude west of bounding box (decimal coordinates)
+            include_multi_day: If True, include multi-day tours (default: False)
         """
         params = {
             "north": north,
@@ -360,7 +363,7 @@ class AmadeusService:
         
         try:
             response = self._make_request("/v1/shopping/activities/by-square", params)
-            return self._format_activity_response(response)
+            return self._format_activity_response(response, include_multi_day=include_multi_day)
         except Exception as e:
             logger.error(f"Activity search by square failed: {e}")
             return {"error": str(e), "activities": []}
@@ -410,10 +413,9 @@ class AmadeusService:
                 return None
             
             locations = location_data.get("locations", [])
-            if not locations:
-                return None
             
-            # Find the first city result (not airport)
+            # Find the first city result (not airport) with coordinates
+            found_city_with_coords = False
             for location in locations:
                 if location.get("type") == "CITY":
                     # Check if coordinates are available in the location data
@@ -425,35 +427,43 @@ class AmadeusService:
                             try:
                                 lat_float = float(lat) if isinstance(lat, str) else lat
                                 lon_float = float(lon) if isinstance(lon, str) else lon
-                                logger.info(f"Found coordinates for {city_name} from Amadeus API: {lat_float}, {lon_float}")
+                                logger.info(f"[GEOCODE] Found coordinates for {city_name} from Amadeus API: {lat_float}, {lon_float}")
+                                found_city_with_coords = True
                                 return (lat_float, lon_float)
                             except (ValueError, TypeError) as e:
-                                logger.warning(f"Invalid coordinates format for {city_name}: {e}")
-                    
-                    # Fallback to external geocoding service if Amadeus doesn't provide coordinates
-                    try:
-                        # Use a free geocoding service as fallback
-                        import requests
-                        geo_response = requests.get(
-                            f"https://nominatim.openstreetmap.org/search",
-                            params={
-                                "q": city_name,
-                                "format": "json",
-                                "limit": 1
-                            },
-                            timeout=5,
-                            headers={"User-Agent": "SmartTravelAssistant/1.0"}
-                        )
-                        if geo_response.ok:
-                            geo_data = geo_response.json()
-                            if geo_data:
-                                lat = float(geo_data[0]["lat"])
-                                lon = float(geo_data[0]["lon"])
-                                logger.info(f"Found coordinates for {city_name} from geocoding service: {lat}, {lon}")
-                                return (lat, lon)
-                    except Exception as geo_error:
-                        logger.warning(f"Geocoding fallback failed for {city_name}: {geo_error}")
+                                logger.warning(f"[GEOCODE] Invalid coordinates format for {city_name}: {e}")
             
+            # Fallback to external geocoding service if Amadeus didn't provide usable coordinates
+            if not found_city_with_coords:
+                try:
+                    # Use a free geocoding service as fallback
+                    import requests
+                    logger.info(f"[GEOCODE] Using OpenStreetMap fallback for {city_name}")
+                    geo_response = requests.get(
+                        f"https://nominatim.openstreetmap.org/search",
+                        params={
+                            "q": city_name,
+                            "format": "json",
+                            "limit": 1
+                        },
+                        timeout=5,
+                        headers={"User-Agent": "SmartTravelAssistant/1.0"}
+                    )
+                    if geo_response.ok:
+                        geo_data = geo_response.json()
+                        if geo_data and len(geo_data) > 0:
+                            lat = float(geo_data[0]["lat"])
+                            lon = float(geo_data[0]["lon"])
+                            logger.info(f"[GEOCODE] Found coordinates for {city_name} from OpenStreetMap: {lat}, {lon}")
+                            return (lat, lon)
+                        else:
+                            logger.warning(f"[GEOCODE] OpenStreetMap returned empty results for {city_name}")
+                    else:
+                        logger.warning(f"[GEOCODE] OpenStreetMap request failed with status {geo_response.status_code} for {city_name}")
+                except Exception as geo_error:
+                    logger.error(f"[GEOCODE] Geocoding fallback failed for {city_name}: {geo_error}")
+            
+            logger.warning(f"[GEOCODE] Could not find coordinates for {city_name} from any source")
             return None
             
         except Exception as e:
@@ -747,6 +757,27 @@ class AmadeusService:
             price_info = offers[0].get("price", {})
             currency = price_info.get("currency", "USD")
             
+            distance_info = hotel_data.get("distance")
+            distance_value = None
+            distance_unit = None
+            if isinstance(distance_info, dict):
+                distance_value = distance_info.get("value")
+                distance_unit = distance_info.get("unit")
+            elif isinstance(distance_info, (int, float)):
+                distance_value = distance_info
+            
+            # Some responses provide textual distance like "0.5KM"
+            if distance_value is None:
+                distance_text = hotel_data.get("distanceFromCenter")
+                if distance_text:
+                    try:
+                        import re
+                        match = re.search(r"(\d+(\.\d+)?)", str(distance_text))
+                        if match:
+                            distance_value = float(match.group(1))
+                    except Exception:
+                        distance_value = None
+            
             hotel_info = {
                 "hotel_id": hotel_data.get("hotelId"),
                 "name": hotel_data.get("name"),
@@ -765,7 +796,8 @@ class AmadeusService:
                 "latitude": geo_code.get("latitude") if geo_code else None,
                 "longitude": geo_code.get("longitude") if geo_code else None,
                 "location": hotel_data.get("address", {}).get("cityName") or hotel_data.get("name", ""),
-                "distance": 0  # Default distance, could be calculated if needed
+                "distance": float(distance_value) if distance_value is not None else None,
+                "distance_unit": distance_unit
             }
             hotels.append(hotel_info)
             if min_price_per_night != max_price_per_night:
@@ -944,31 +976,114 @@ class AmadeusService:
         
         return {"offer": formatted_offer, "count": 1}
     
-    def _format_activity_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+    def _format_activity_response(self, response: Dict[str, Any], include_multi_day: bool = False) -> Dict[str, Any]:
         """
         Format activity search response according to Swagger spec
-        Handles both list responses and single activity responses
+        Filters out airport transfers / private cars / shuttles automatically
+        Filters out multi-day packages by default (unless include_multi_day=True)
+        
+        Args:
+            response: Raw API response
+            include_multi_day: If False, exclude multi-day tours (default: False)
         """
         activities = []
         data = response.get("data", [])
         
-        # Handle both array and single object responses
+        # Normalize input to list
         if isinstance(data, list):
             activity_list = data
         else:
             activity_list = [data] if data else []
         
+        # 🚫 필터링할 키워드 정의
+        EXCLUDED_KEYWORDS = [
+            "transfer",
+            "airport",
+            "shuttle",
+            "pick-up",
+            "pickup",
+            "dropoff",
+            "car service",
+            "private car",
+            "taxi",
+        ]
+        
         for activity in activity_list:
-            # Extract price information
-            price_info = activity.get("price", {})
+            name = (activity.get("name") or "").lower()
+            short_desc = (activity.get("shortDescription") or "").lower()
             
-            # Extract geoCode information
+            # ❌ Transfer / Airport 관련 Activity 자동 배제
+            if any(k in name for k in EXCLUDED_KEYWORDS) or any(k in short_desc for k in EXCLUDED_KEYWORDS):
+                logger.info(f"[AMADEUS] Skipped transfer-like activity: {activity.get('name')}")
+                continue
+            
+            # Extract needed fields
+            price_info = activity.get("price", {})
             geo_code = activity.get("geoCode", {})
+            minimum_duration = activity.get("minimumDuration")
+            
+            # ❌ 멀티데이 패키지 필터링 (기본 검색에서는 제외)
+            if not include_multi_day:
+                # minimumDuration이 며칠(Days)인지 확인
+                is_multi_day = False
+                if minimum_duration:
+                    duration_str = str(minimum_duration).upper()
+                    # ISO 8601 형식: P#D (예: P3D = 3일), P#DT#H (예: P2DT12H = 2일 12시간)
+                    if "D" in duration_str and not duration_str.startswith("PT"):
+                        # P#D 형식이면 멀티데이
+                        try:
+                            day_match = re.search(r'P(\d+)D', duration_str)
+                            if day_match:
+                                days = int(day_match.group(1))
+                                if days >= 1:
+                                    is_multi_day = True
+                        except Exception:
+                            pass
+                    # 이름이나 설명에 "day", "days" 포함 여부 확인
+                    if not is_multi_day:
+                        if "day" in name or "days" in name or "day" in short_desc or "days" in short_desc:
+                            # 숫자와 함께 나오는 경우만 멀티데이로 판단
+                            day_pattern = r'\d+\s*(day|days)'
+                            if re.search(day_pattern, name) or re.search(day_pattern, short_desc):
+                                is_multi_day = True
+                
+                if is_multi_day:
+                    logger.info(f"[AMADEUS] Skipped multi-day activity: {activity.get('name')} (duration: {minimum_duration})")
+                    continue
+                
+                # 가격이 너무 큰 것도 필터링 (> 600 USD)
+                price_amount_raw = price_info.get("amount")
+                currency = price_info.get("currencyCode", "USD").upper()
+                if price_amount_raw is not None:
+                    # Convert to float safely
+                    try:
+                        price_amount = float(price_amount_raw)
+                    except (ValueError, TypeError):
+                        # If price is not a valid number, skip price filter
+                        price_amount = None
+                    
+                    if price_amount is not None and price_amount > 0:
+                        # USD로 변환 (간단한 변환, 실제로는 환율 API 사용 권장)
+                        usd_price = price_amount
+                        if currency != "USD":
+                            # 주요 통화 환율 (대략적)
+                            exchange_rates = {
+                                "EUR": 1.1,
+                                "GBP": 1.25,
+                                "JPY": 0.0067,
+                                "CNY": 0.14,
+                                "KRW": 0.00075,
+                            }
+                            if currency in exchange_rates:
+                                usd_price = price_amount * exchange_rates[currency]
+                        
+                        if usd_price > 600:
+                            logger.info(f"[AMADEUS] Skipped expensive activity: {activity.get('name')} (price: {price_amount} {currency} ≈ ${usd_price:.2f} USD)")
+                            continue
             
             # Handle pictures - according to Swagger spec, it's an array of strings (URLs)
             pictures = activity.get("pictures", [])
             if pictures and isinstance(pictures[0], dict):
-                # If it's an array of objects, extract URLs
                 pictures = [pic.get("url") or pic for pic in pictures]
             
             activity_data = {
@@ -976,7 +1091,7 @@ class AmadeusService:
                 "type": activity.get("type", "activity"),
                 "name": activity.get("name"),
                 "shortDescription": activity.get("shortDescription"),
-                "description": activity.get("description"),  # Full description
+                "description": activity.get("description"),
                 "price": {
                     "amount": price_info.get("amount"),
                     "currencyCode": price_info.get("currencyCode")
@@ -987,9 +1102,9 @@ class AmadeusService:
                     "latitude": geo_code.get("latitude"),
                     "longitude": geo_code.get("longitude")
                 } if geo_code else None,
-                "minimumDuration": activity.get("minimumDuration"),
+                "minimumDuration": minimum_duration,
                 "bookingLink": activity.get("bookingLink"),
-                "self": activity.get("self", {})  # Link to get more details
+                "self": activity.get("self", {})
             }
             
             activities.append(activity_data)
@@ -1011,11 +1126,33 @@ class AmadeusService:
     def _format_single_activity_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         Format single activity detail response
+        Filters out airport transfers / private cars / shuttles automatically
         """
         activity = response.get("data", {})
         
         if not activity:
             return {"error": "No activity data found", "activity": None}
+        
+        # 🚫 필터링할 키워드 정의
+        EXCLUDED_KEYWORDS = [
+            "transfer",
+            "airport",
+            "shuttle",
+            "pick-up",
+            "pickup",
+            "dropoff",
+            "car service",
+            "private car",
+            "taxi",
+        ]
+        
+        name = (activity.get("name") or "").lower()
+        short_desc = (activity.get("shortDescription") or "").lower()
+        
+        # ❌ Transfer / Airport 관련 Activity 자동 배제
+        if any(k in name for k in EXCLUDED_KEYWORDS) or any(k in short_desc for k in EXCLUDED_KEYWORDS):
+            logger.info(f"[AMADEUS] Skipped transfer-like activity: {activity.get('name')}")
+            return {"error": "Transfer/private car activity filtered out", "activity": None}
         
         # Extract price information
         price_info = activity.get("price", {})
@@ -1034,7 +1171,7 @@ class AmadeusService:
             "type": activity.get("type", "activity"),
             "name": activity.get("name"),
             "shortDescription": activity.get("shortDescription"),
-            "description": activity.get("description"),  # Full description
+            "description": activity.get("description"),
             "price": {
                 "amount": price_info.get("amount"),
                 "currencyCode": price_info.get("currencyCode")
