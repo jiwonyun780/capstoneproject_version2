@@ -3521,6 +3521,115 @@ export default function OptimizedItinerary() {
                 onToggleItem={(itemIndex) => toggleItem(day.day, itemIndex)}
               />
             ))}
+
+            {/* Total Trip Cost Summary */}
+            {(flightsCost > 0 || hotelsCost > 0 || activitiesCost > 0) && (
+              <div style={{
+                marginTop: '48px',
+                padding: '32px',
+                backgroundColor: 'linear-gradient(135deg, #004C8C 0%, #00ADEF 100%)',
+                background: 'linear-gradient(135deg, #004C8C 0%, #00ADEF 100%)',
+                borderRadius: '16px',
+                boxShadow: '0 10px 25px rgba(0, 76, 140, 0.2)',
+                color: 'white'
+              }}>
+                <h3 style={{
+                  fontSize: '24px',
+                  fontWeight: 700,
+                  marginBottom: '24px',
+                  color: 'white'
+                }}>
+                  💰 Total Trip Cost
+                </h3>
+                
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                  gap: '20px',
+                  marginBottom: '24px'
+                }}>
+                  {flightsCost > 0 && (
+                    <div style={{
+                      padding: '16px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.15)',
+                      borderRadius: '12px',
+                      backdropFilter: 'blur(10px)'
+                    }}>
+                      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>Flights</div>
+                      <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                        ${flightsCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      {outboundFlight && returnFlight && (
+                        <div style={{ fontSize: '12px', opacity: 0.8, marginTop: '4px' }}>
+                          Round-trip
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {hotelsCost > 0 && (
+                    <div style={{
+                      padding: '16px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.15)',
+                      borderRadius: '12px',
+                      backdropFilter: 'blur(10px)'
+                    }}>
+                      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>Hotels</div>
+                      <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                        ${hotelsCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      {finalItineraryData?.hotelStays && finalItineraryData.hotelStays.length > 0 && (
+                        <div style={{ fontSize: '12px', opacity: 0.8, marginTop: '4px' }}>
+                          {finalItineraryData.hotelStays.reduce((sum, hotel) => sum + (hotel.nights || 0), 0)} night{finalItineraryData.hotelStays.reduce((sum, hotel) => sum + (hotel.nights || 0), 0) !== 1 ? 's' : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {activitiesCost > 0 && (
+                    <div style={{
+                      padding: '16px',
+                      backgroundColor: 'rgba(255, 255, 255, 0.15)',
+                      borderRadius: '12px',
+                      backdropFilter: 'blur(10px)'
+                    }}>
+                      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>Activities</div>
+                      <div style={{ fontSize: '28px', fontWeight: 700 }}>
+                        ${activitiesCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      {finalItineraryData?.days && (
+                        <div style={{ fontSize: '12px', opacity: 0.8, marginTop: '4px' }}>
+                          {finalItineraryData.days.reduce((sum, day) => sum + (day.activities?.length || 0), 0)} activity{finalItineraryData.days.reduce((sum, day) => sum + (day.activities?.length || 0), 0) !== 1 ? 'ies' : 'y'}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                
+                <div style={{
+                  padding: '20px',
+                  backgroundColor: 'rgba(255, 255, 255, 0.2)',
+                  borderRadius: '12px',
+                  border: '2px solid rgba(255, 255, 255, 0.3)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <div>
+                    <div style={{ fontSize: '16px', opacity: 0.9, marginBottom: '4px' }}>Grand Total</div>
+                    <div style={{ fontSize: '36px', fontWeight: 700 }}>
+                      ${totalCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                  <div style={{
+                    fontSize: '48px',
+                    opacity: 0.8
+                  }}>
+                    ✈️
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </ScrollArea>

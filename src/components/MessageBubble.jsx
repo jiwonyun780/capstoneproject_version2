@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ComparisonModal } from './dashboard/ComparisonModal';
+import { recordTripSelection, saveTripState, loadTripState } from '../utils/tripState';
 
 // Visual components for enhanced itinerary display
 function ItineraryCard({ day, activities, weather, time }) {
@@ -334,51 +335,94 @@ function renderTextWithMapLinks(text) {
 
 // Render itinerary visual components
 function renderItineraryVisual(content, skipMarkdown = false, userPreferences = null) {
-  // More flexible regex that handles incomplete blocks
-  const itineraryMatch = content.match(/```itinerary\n?([\s\S]*?)(?:\n```|```|$)/);
-  if (!itineraryMatch) {
-    // Prevent infinite recursion: if skipMarkdown is true, return plain text
+  // More flexible regex that handles incomplete blocks (with or without closing ```)
+  // This pattern matches: ```itinerary followed by content, ending with ``` or end of string
+  // Also handles cases where there's no closing ``` or the block is incomplete
+  const itineraryMatch = content.match(/```itinerary\s*\n?([\s\S]*?)(?:\n```|```|$)/);
+  
+  // If no match, try to find any ```itinerary block (even without closing)
+  let jsonContent = null;
+  if (itineraryMatch) {
+    jsonContent = itineraryMatch[1].trim();
+  } else {
+    // Try matching without closing backticks
+    const openMatch = content.match(/```itinerary\s*\n?([\s\S]+)/);
+    if (openMatch) {
+      jsonContent = openMatch[1].trim();
+    }
+  }
+  
+  if (!jsonContent) {
+    // No itinerary block found - render content normally but ensure any JSON is hidden
     if (skipMarkdown) {
       return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
     }
-    // Remove itinerary block and render the rest
-    const withoutItinerary = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
-    return withoutItinerary ? renderMarkdown(withoutItinerary, null, null, true, userPreferences) : null;
+    // Remove any potential JSON blocks and render the rest
+    const cleaned = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '').replace(/```json[\s\S]*?(?:```|$)/g, '');
+    return cleaned ? renderMarkdown(cleaned, null, null, true, userPreferences) : null;
   }
   
   try {
     // Try to clean up the JSON before parsing
-    let jsonContent = itineraryMatch[1].trim();
+    let cleanedJson = jsonContent;
     
-    // Remove any trailing incomplete objects (like { "" timestamp=...)
-    // Find the last complete JSON structure
-    const lastCompleteBrace = jsonContent.lastIndexOf('}');
-    if (lastCompleteBrace > 0) {
-      // Check if there's incomplete content after the last }
-      const afterLastBrace = jsonContent.substring(lastCompleteBrace + 1).trim();
-      if (afterLastBrace && !afterLastBrace.match(/^[,\s]*\]?\s*\}?\s*$/)) {
-        // There's incomplete content, truncate to last complete brace
-        jsonContent = jsonContent.substring(0, lastCompleteBrace + 1);
-        // Try to close the structure properly
-        if (!jsonContent.trim().endsWith('}')) {
-          // Count braces to see if we need to close arrays/objects
-          const openBraces = (jsonContent.match(/\{/g) || []).length;
-          const closeBraces = (jsonContent.match(/\}/g) || []).length;
-          const openBrackets = (jsonContent.match(/\[/g) || []).length;
-          const closeBrackets = (jsonContent.match(/\]/g) || []).length;
+    // Strategy: Find the last complete day object by looking for patterns
+    // First, try to find complete day objects using a more robust pattern
+    // Look for: "day": number, followed by complete object structure
+    const dayPattern = /"day"\s*:\s*\d+\s*,[\s\S]*?\}(?=\s*,|\s*\]|$)/g;
+    const dayMatches = [...cleanedJson.matchAll(dayPattern)];
+    
+    if (dayMatches.length > 0) {
+      // Get the position after the last complete day object
+      const lastMatch = dayMatches[dayMatches.length - 1];
+      const endPos = lastMatch.index + lastMatch[0].length;
+      
+      // Find where the days array starts
+      const daysArrayStart = cleanedJson.indexOf('"days"');
+      if (daysArrayStart >= 0) {
+        const arrayStartPos = cleanedJson.indexOf('[', daysArrayStart);
+        if (arrayStartPos >= 0 && endPos > arrayStartPos) {
+          // Reconstruct JSON with only complete days
+          const beforeDays = cleanedJson.substring(0, arrayStartPos + 1);
+          const validDays = cleanedJson.substring(arrayStartPos + 1, endPos);
+          
+          // Remove any incomplete trailing content and close properly
+          cleanedJson = beforeDays + validDays + ']';
+          
+          // Ensure the outer object is closed
+          if (!cleanedJson.trim().endsWith('}')) {
+            cleanedJson += '}';
+          }
+        }
+      }
+    } else {
+      // Fallback: Try to find the last complete closing brace
+      // Look for the pattern: } followed by ] or } or end of string
+      const lastCompleteBrace = cleanedJson.lastIndexOf('}');
+      if (lastCompleteBrace > 0) {
+        const afterBrace = cleanedJson.substring(lastCompleteBrace + 1).trim();
+        // If there's incomplete content after the last }, truncate
+        if (afterBrace && !afterBrace.match(/^[,\s]*\]?\s*\}?\s*$/)) {
+          cleanedJson = cleanedJson.substring(0, lastCompleteBrace + 1);
+          
+          // Close arrays and objects properly
+          const openBraces = (cleanedJson.match(/\{/g) || []).length;
+          const closeBraces = (cleanedJson.match(/\}/g) || []).length;
+          const openBrackets = (cleanedJson.match(/\[/g) || []).length;
+          const closeBrackets = (cleanedJson.match(/\]/g) || []).length;
           
           // Close arrays first, then objects
           for (let i = 0; i < openBrackets - closeBrackets; i++) {
-            jsonContent += ']';
+            cleanedJson += ']';
           }
           for (let i = 0; i < openBraces - closeBraces; i++) {
-            jsonContent += '}';
+            cleanedJson += '}';
           }
         }
       }
     }
     
-    const itineraryData = JSON.parse(jsonContent);
+    const itineraryData = JSON.parse(cleanedJson);
     const remainingContent = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
     
     return (
@@ -397,23 +441,129 @@ function renderItineraryVisual(content, skipMarkdown = false, userPreferences = 
     );
   } catch (e) {
     console.error('Failed to parse itinerary JSON:', e);
-    console.error('JSON content:', itineraryMatch[1]);
+    console.error('JSON content (first 500 chars):', jsonContent.substring(0, 500));
     
-    // Prevent infinite recursion: if skipMarkdown is true, return plain text
-    if (skipMarkdown) {
-      return <div style={{ whiteSpace: 'pre-wrap' }}>{content}</div>;
+    // Try to extract and display days even if full JSON parsing fails
+    try {
+      // Try to extract day objects manually using regex - look for complete day structures
+      const dayExtractPattern = /"day"\s*:\s*(\d+)\s*,\s*"time"\s*:\s*"([^"]*)"\s*,\s*"weather"\s*:\s*"([^"]*)"\s*,\s*"activities"\s*:\s*\[([\s\S]*?)\](?=\s*,|\s*\}|\s*$)/g;
+      const dayExtractMatches = [...jsonContent.matchAll(dayExtractPattern)];
+      
+      if (dayExtractMatches.length > 0) {
+        const days = [];
+        dayExtractMatches.forEach((match) => {
+          const dayNum = parseInt(match[1]);
+          const time = match[2];
+          const weather = match[3];
+          const activitiesText = match[4];
+          
+          // Extract activities from the activities array
+          const activityPattern = /\{\s*"title"\s*:\s*"([^"]+)"\s*,\s*"description"\s*:\s*"([^"]*)"(?:\s*,\s*"duration"\s*:\s*"([^"]*)")?(?:\s*,\s*"price"\s*:\s*"([^"]*)")?(?:\s*,\s*"rating"\s*:\s*"([^"]*)")?[\s\S]*?\}/g;
+          const activities = [];
+          let activityMatch;
+          while ((activityMatch = activityPattern.exec(activitiesText)) !== null) {
+            activities.push({
+              title: activityMatch[1],
+              description: activityMatch[2],
+              duration: activityMatch[3] || '',
+              price: activityMatch[4] || '',
+              rating: activityMatch[5] || ''
+            });
+          }
+          
+          days.push({
+            day: dayNum,
+            time: time,
+            weather: weather,
+            activities: activities
+          });
+        });
+        
+        if (days.length > 0) {
+          const remainingContent = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
+          return (
+            <div style={{ margin: '16px 0' }}>
+              {days.map((day, index) => (
+                <ItineraryCard
+                  key={index}
+                  day={day.day || index + 1}
+                  activities={day.activities || []}
+                  weather={day.weather}
+                  time={day.time}
+                />
+              ))}
+              {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true, userPreferences)}
+            </div>
+          );
+        }
+      }
+      
+      // Simpler fallback: just extract day numbers and activity titles
+      const simpleDayPattern = /"day"\s*:\s*(\d+)[\s\S]*?"activities"\s*:\s*\[([\s\S]*?)\]/g;
+      const simpleDayMatches = [...jsonContent.matchAll(simpleDayPattern)];
+      
+      if (simpleDayMatches.length > 0) {
+        const days = [];
+        simpleDayMatches.forEach((match, idx) => {
+          const dayNum = parseInt(match[1]);
+          const activitiesText = match[2];
+          // Try to extract activity titles
+          const activityTitles = [...activitiesText.matchAll(/"title"\s*:\s*"([^"]+)"/g)].map(m => m[1]);
+          days.push({
+            day: dayNum,
+            activities: activityTitles.map(title => ({ title })),
+            time: `Day ${dayNum}`
+          });
+        });
+        
+        if (days.length > 0) {
+          const remainingContent = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
+          return (
+            <div style={{ margin: '16px 0' }}>
+              {days.map((day, index) => (
+                <ItineraryCard
+                  key={index}
+                  day={day.day || index + 1}
+                  activities={day.activities || []}
+                  weather={day.weather}
+                  time={day.time}
+                />
+              ))}
+              {remainingContent.trim() && renderMarkdown(remainingContent, null, null, true, userPreferences)}
+            </div>
+          );
+        }
+      }
+    } catch (fallbackError) {
+      console.error('Fallback parsing also failed:', fallbackError);
     }
     
-    // Remove itinerary block (including incomplete ones) and render the rest
-    const withoutItinerary = content.replace(/```itinerary[\s\S]*?(?:```|$)/g, '');
+    // Remove itinerary block completely (including incomplete ones with or without closing ```)
+    // More aggressive regex to catch all variations - this ensures raw JSON is NEVER shown
+    let withoutItinerary = content.replace(/```itinerary[\s\S]*?```/g, ''); // Remove complete blocks
+    withoutItinerary = withoutItinerary.replace(/```itinerary[\s\S]*$/g, ''); // Remove incomplete blocks at end
+    withoutItinerary = withoutItinerary.replace(/```itinerary[\s\S]*?(?=\n\n|$)/g, ''); // Remove any remaining
+    withoutItinerary = withoutItinerary.replace(/```json[\s\S]*?```/g, ''); // Also remove any ```json blocks
+    withoutItinerary = withoutItinerary.replace(/```json[\s\S]*$/g, ''); // Remove incomplete json blocks
     
-    // Show a user-friendly error message instead of raw markdown
+    // Prevent infinite recursion: if skipMarkdown is true, return plain text (but still hide JSON)
+    if (skipMarkdown) {
+      return <div style={{ whiteSpace: 'pre-wrap' }}>{withoutItinerary}</div>;
+    }
+    
+    // Show a user-friendly message and render the rest of the content (without the JSON block)
+    // IMPORTANT: Never show raw JSON - always hide it completely
     return (
-      <div style={{ margin: '16px 0', padding: '12px', backgroundColor: '#fff3cd', border: '1px solid #ffc107', borderRadius: '4px' }}>
-        <strong>⚠️ Unable to display itinerary</strong>
-        <p style={{ margin: '8px 0 0 0', fontSize: '14px' }}>
-          The itinerary data appears to be incomplete. Please try asking the assistant to regenerate the itinerary.
-        </p>
+      <div style={{ margin: '16px 0' }}>
+        <div style={{ padding: '16px', backgroundColor: '#e8f5e9', border: '1px solid #4caf50', borderRadius: '8px', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+            <span style={{ fontSize: '20px' }}>✅</span>
+            <strong style={{ fontSize: '16px', color: '#2e7d32' }}>Your Itinerary Has Been Created!</strong>
+          </div>
+          <p style={{ margin: '0', fontSize: '14px', color: '#1b5e20' }}>
+            Your itinerary includes all your selected flights, hotels, and activities. Click "View Itinerary" or navigate to the itinerary page to see the full details.
+          </p>
+        </div>
         {withoutItinerary.trim() && renderMarkdown(withoutItinerary, null, null, true, userPreferences)}
       </div>
     );
@@ -1078,6 +1228,415 @@ function renderCellContent(cell, rowIndex, cellIndex, headerRow = null, isReturn
   
   // Default rendering
   return cell;
+}
+
+// Component to handle "Add to Itinerary" button for hotels
+function AddToItineraryHotelButton({ hotel, rowIndex, tableIndex }) {
+  const [isSelected, setIsSelected] = useState(false);
+  
+  // Extract hotel data from hotel object
+  const hotelName = hotel?.name ? hotel.name.toString().trim().replace(/\*\*/g, '') : '';
+  const priceStr = hotel?.price ? hotel.price.toString().trim() : '';
+  // Extract price - handle "From $X/night" format
+  const priceMatch = priceStr.match(/from\s*\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/i) || priceStr.match(/\$?(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+  const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+  const rating = hotel?.rating ? hotel.rating.toString().trim() : '';
+  const location = hotel?.location ? hotel.location.toString().trim() : '';
+  
+  // Extract booking link
+  let bookingUrl = null;
+  if (hotel?.booking) {
+    const bookingCell = hotel.booking.toString();
+    const linkMatch = bookingCell.match(/\[([^\]]+)\]\(([^)]+)\)/);
+    if (linkMatch) {
+      bookingUrl = linkMatch[2].startsWith('http') ? linkMatch[2] : `https://${linkMatch[2]}`;
+    }
+  }
+  
+  const handleToggle = () => {
+    const newSelected = !isSelected;
+    setIsSelected(newSelected);
+    
+    if (newSelected) {
+      const hotelObj = {
+        id: `hotel-${tableIndex}-${rowIndex}`,
+        name: hotelName,
+        hotelName: hotelName,
+        price: price,
+        price_per_night: price,
+        rating: rating,
+        location: location,
+        bookingUrl: bookingUrl
+      };
+      
+      recordTripSelection('hotel', hotelObj);
+      
+      // Also save as selectedHotel
+      const currentState = loadTripState();
+      saveTripState({
+        ...currentState,
+        selectedHotel: hotelObj
+      });
+    }
+  };
+  
+  return (
+    <button
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handleToggle();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleToggle();
+        }
+      }}
+      style={{
+        width: '100%',
+        padding: '8px 12px',
+        fontSize: '12px',
+        fontWeight: '500',
+        color: isSelected ? '#ffffff' : '#004C8C',
+        backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+        border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+        borderRadius: '6px',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '4px',
+        whiteSpace: 'nowrap'
+      }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = '#004C8C';
+          e.currentTarget.style.color = '#ffffff';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = 'transparent';
+          e.currentTarget.style.color = '#004C8C';
+        }
+      }}
+    >
+      {isSelected ? (
+        <>
+          <span>✓</span>
+          <span>Added</span>
+        </>
+      ) : (
+        <span>Add to itinerary</span>
+      )}
+    </button>
+  );
+}
+
+// Component to handle "Add to Itinerary" button for flights
+function AddToItineraryFlightButton({ row, rowIndex, headerRow, tableIndex, isOutbound }) {
+  console.log('AddToItineraryFlightButton FUNCTION CALLED', { row: !!row, headerRow: !!headerRow, tableIndex, rowIndex, isOutbound });
+  const [isSelected, setIsSelected] = useState(false);
+  
+  // Debug logging
+  useEffect(() => {
+    console.log('AddToItineraryFlightButton rendered', { 
+      hasHeaderRow: !!headerRow, 
+      hasRow: !!row, 
+      tableIndex, 
+      rowIndex, 
+      isOutbound,
+      headerRowLength: headerRow?.length,
+      rowLength: row?.length
+    });
+  }, []);
+  
+  // Check if flight is already selected on mount and when tripState changes
+  useEffect(() => {
+    if (!headerRow || !row) {
+      setIsSelected(false);
+      return;
+    }
+    
+    const currentTripState = loadTripState();
+    const selectedFlight = isOutbound 
+      ? currentTripState?.selectedOutboundFlight 
+      : currentTripState?.selectedReturnFlight;
+    
+    const flightId = `${isOutbound ? 'outbound' : 'return'}-flight-${tableIndex}-${rowIndex}`;
+    if (selectedFlight && selectedFlight.id === flightId) {
+      setIsSelected(true);
+    } else {
+      setIsSelected(false);
+    }
+  }, [row, rowIndex, tableIndex, isOutbound, headerRow]);
+  
+  // Early return if headerRow or row is not available - but render a placeholder to help debug
+  if (!headerRow || !row) {
+    console.warn('AddToItineraryFlightButton: Missing headerRow or row', { 
+      headerRow: !!headerRow, 
+      row: !!row, 
+      tableIndex, 
+      rowIndex,
+      headerRowType: typeof headerRow,
+      rowType: typeof row
+    });
+    // Render a placeholder button instead of null to help debug
+    return (
+      <button
+        style={{
+          width: '100%',
+          padding: '8px 12px',
+          fontSize: '12px',
+          backgroundColor: '#ffcccc',
+          color: '#cc0000',
+          border: '1px solid #cc0000',
+          borderRadius: '6px',
+          cursor: 'not-allowed'
+        }}
+        disabled
+      >
+        Debug: Missing data
+      </button>
+    );
+  }
+  
+  const getColumnIndex = (keywords) => {
+    for (let i = 0; i < headerRow.length; i++) {
+      const header = headerRow[i]?.toString().toLowerCase().trim() || '';
+      if (keywords.some(keyword => header.includes(keyword))) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  
+  const airlineIndex = getColumnIndex(['airline']);
+  const flightCodeIndex = getColumnIndex(['flight code', 'flight']);
+  const priceIndex = getColumnIndex(['price']);
+  const durationIndex = getColumnIndex(['duration']);
+  const stopsIndex = getColumnIndex(['stop', 'stops', 'layover']);
+  const departureIndex = getColumnIndex(['departure']);
+  const arrivalIndex = getColumnIndex(['arrival']);
+  const originIndex = getColumnIndex(['origin']);
+  const destIndex = getColumnIndex(['destination']);
+  
+  // Extract flight data
+  const airline = airlineIndex >= 0 && row[airlineIndex] ? row[airlineIndex].toString().trim() : '';
+  const flightCode = flightCodeIndex >= 0 && row[flightCodeIndex] ? row[flightCodeIndex].toString().trim() : '';
+  const priceStr = priceIndex >= 0 && row[priceIndex] ? row[priceIndex].toString().trim() : '0';
+  const priceMatch = priceStr.match(/[€$]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+  const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+  const duration = durationIndex >= 0 && row[durationIndex] ? row[durationIndex].toString().trim() : '';
+  const stopsStr = stopsIndex >= 0 && row[stopsIndex] ? row[stopsIndex].toString().trim() : '0';
+  const stopsMatch = stopsStr.match(/(\d+)/);
+  const stops = stopsMatch ? parseInt(stopsMatch[1]) : (stopsStr.toLowerCase().includes('non-stop') ? 0 : 0);
+  const departure = departureIndex >= 0 && row[departureIndex] ? row[departureIndex].toString().trim() : '';
+  const arrival = arrivalIndex >= 0 && row[arrivalIndex] ? row[arrivalIndex].toString().trim() : '';
+  const origin = originIndex >= 0 && row[originIndex] ? row[originIndex].toString().trim() : '';
+  const destination = destIndex >= 0 && row[destIndex] ? row[destIndex].toString().trim() : '';
+  
+  const handleToggle = () => {
+    const newSelected = !isSelected;
+    setIsSelected(newSelected);
+    
+    if (newSelected) {
+      const flightObj = {
+        id: `${isOutbound ? 'outbound' : 'return'}-flight-${tableIndex}-${rowIndex}`,
+        airline,
+        flightNumber: flightCode,
+        price,
+        currency: 'USD',
+        duration,
+        stops,
+        departure,
+        arrival,
+        origin,
+        destination,
+        type: isOutbound ? 'outbound' : 'return'
+      };
+      
+      recordTripSelection('flight', flightObj);
+      
+      // Also save as selectedOutboundFlight or selectedReturnFlight
+      const currentState = loadTripState();
+      if (isOutbound) {
+        saveTripState({
+          ...currentState,
+          selectedOutboundFlight: flightObj
+        });
+      } else {
+        saveTripState({
+          ...currentState,
+          selectedReturnFlight: flightObj
+        });
+      }
+    }
+  };
+  
+  return (
+    <button
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handleToggle();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleToggle();
+        }
+      }}
+      style={{
+        width: '100%',
+        padding: '8px 12px',
+        fontSize: '12px',
+        fontWeight: '500',
+        color: isSelected ? '#ffffff' : '#004C8C',
+        backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+        border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+        borderRadius: '6px',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '4px',
+        whiteSpace: 'nowrap'
+      }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = '#004C8C';
+          e.currentTarget.style.color = '#ffffff';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = 'transparent';
+          e.currentTarget.style.color = '#004C8C';
+        }
+      }}
+    >
+      {isSelected ? (
+        <>
+          <span>✓</span>
+          <span>Added to itinerary</span>
+        </>
+      ) : (
+        <span>Add to itinerary</span>
+      )}
+    </button>
+  );
+}
+
+// Component to handle flight selection and "Add to Itinerary"
+function FlightRowWithAddButton({ row, rowIndex, headerRow, tableIndex, isOutbound, isReturn, onToggle, isSelected }) {
+  const getColumnIndex = (keywords) => {
+    for (let i = 0; i < headerRow.length; i++) {
+      const header = headerRow[i]?.toString().toLowerCase().trim() || '';
+      if (keywords.some(keyword => header.includes(keyword))) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  
+  const airlineIndex = getColumnIndex(['airline']);
+  const flightCodeIndex = getColumnIndex(['flight code', 'flight']);
+  const priceIndex = getColumnIndex(['price']);
+  const durationIndex = getColumnIndex(['duration']);
+  const stopsIndex = getColumnIndex(['stop', 'stops', 'layover']);
+  const departureIndex = getColumnIndex(['departure']);
+  const arrivalIndex = getColumnIndex(['arrival']);
+  const originIndex = getColumnIndex(['origin']);
+  const destIndex = getColumnIndex(['destination']);
+  
+  // Extract flight data
+  const airline = airlineIndex >= 0 && row[airlineIndex] ? row[airlineIndex].toString().trim() : '';
+  const flightCode = flightCodeIndex >= 0 && row[flightCodeIndex] ? row[flightCodeIndex].toString().trim() : '';
+  const priceStr = priceIndex >= 0 && row[priceIndex] ? row[priceIndex].toString().trim() : '0';
+  const priceMatch = priceStr.match(/[€$]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+  const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+  const duration = durationIndex >= 0 && row[durationIndex] ? row[durationIndex].toString().trim() : '';
+  const stopsStr = stopsIndex >= 0 && row[stopsIndex] ? row[stopsIndex].toString().trim() : '0';
+  const stopsMatch = stopsStr.match(/(\d+)/);
+  const stops = stopsMatch ? parseInt(stopsMatch[1]) : (stopsStr.toLowerCase().includes('non-stop') ? 0 : 0);
+  const departure = departureIndex >= 0 && row[departureIndex] ? row[departureIndex].toString().trim() : '';
+  const arrival = arrivalIndex >= 0 && row[arrivalIndex] ? row[arrivalIndex].toString().trim() : '';
+  const origin = originIndex >= 0 && row[originIndex] ? row[originIndex].toString().trim() : '';
+  const destination = destIndex >= 0 && row[destIndex] ? row[destIndex].toString().trim() : '';
+  
+  const flightData = {
+    id: `${isOutbound ? 'outbound' : 'return'}-flight-${tableIndex}-${rowIndex}`,
+    airline,
+    flightNumber: flightCode,
+    price,
+    currency: 'USD',
+    duration,
+    stops,
+    departure,
+    arrival,
+    origin,
+    destination,
+    type: isOutbound ? 'outbound' : 'return'
+  };
+  
+  return (
+    <button
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onToggle(rowIndex, flightData);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onToggle(rowIndex, flightData);
+        }
+      }}
+      style={{
+        flex: '1',
+        minWidth: '140px',
+        padding: '10px 16px',
+        fontSize: '14px',
+        fontWeight: '500',
+        color: isSelected ? '#ffffff' : '#004C8C',
+        backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+        border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+        borderRadius: '8px',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '6px',
+        marginTop: '8px'
+      }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = '#004C8C';
+          e.currentTarget.style.color = '#ffffff';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = 'transparent';
+          e.currentTarget.style.color = '#004C8C';
+        }
+      }}
+    >
+      {isSelected ? (
+        <>
+          <span>✓</span>
+          <span>Added to itinerary</span>
+        </>
+      ) : (
+        <span>Add to itinerary</span>
+      )}
+    </button>
+  );
 }
 
 // FlightTableComparison component to handle comparison state
@@ -2706,8 +3265,8 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
                   Location
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2' }}>
-                  Booking
+                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#2D6CDF', borderBottom: '2px solid #DADDE2', width: '200px' }}>
+                  Actions
                 </th>
               </tr>
             </thead>
@@ -2806,13 +3365,14 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       )}
                     </td>
                     <td style={{ padding: '16px 12px', textAlign: 'left' }}>
-                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-                        {/* Primary: Booking.com button (filled style) */}
-                        {bookingComLink && (
-                          <a
-                            href={bookingComLink.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                          {/* Primary: Booking.com button (filled style) */}
+                          {bookingComLink && (
+                            <a
+                              href={bookingComLink.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
                             style={{
                               color: 'white',
                               textDecoration: 'none',
@@ -2863,6 +3423,13 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                             {link.text.includes('Expedia') ? 'Expedia' : link.text.includes('Hotels.com') ? 'Hotels.com' : link.text}
                           </a>
                         ))}
+                        </div>
+                        {/* Add to Itinerary Button */}
+                        <AddToItineraryHotelButton
+                          hotel={hotel}
+                          rowIndex={idx}
+                          tableIndex={tableIndex}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -3329,6 +3896,58 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
   
   const bookNowIndex = getColumnIndex(['book now', 'book']);
   
+  // Helper function to extract flight data from table row
+  const extractFlightData = (row, headerRow, rowIndex, tableIndex, isOutbound) => {
+    const getColumnIndex = (keywords) => {
+      for (let i = 0; i < headerRow.length; i++) {
+        const header = headerRow[i]?.toString().toLowerCase().trim() || '';
+        if (keywords.some(keyword => header.includes(keyword))) {
+          return i;
+        }
+      }
+      return -1;
+    };
+    
+    const airlineIndex = getColumnIndex(['airline']);
+    const flightCodeIndex = getColumnIndex(['flight code', 'flight']);
+    const priceIndex = getColumnIndex(['price']);
+    const durationIndex = getColumnIndex(['duration']);
+    const stopsIndex = getColumnIndex(['stop', 'stops', 'layover']);
+    const departureIndex = getColumnIndex(['departure']);
+    const arrivalIndex = getColumnIndex(['arrival']);
+    const originIndex = getColumnIndex(['origin']);
+    const destIndex = getColumnIndex(['destination']);
+    
+    const airline = airlineIndex >= 0 && row[airlineIndex] ? row[airlineIndex].toString().trim() : '';
+    const flightCode = flightCodeIndex >= 0 && row[flightCodeIndex] ? row[flightCodeIndex].toString().trim() : '';
+    const priceStr = priceIndex >= 0 && row[priceIndex] ? row[priceIndex].toString().trim() : '0';
+    const priceMatch = priceStr.match(/[€$]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+    const price = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : 0;
+    const duration = durationIndex >= 0 && row[durationIndex] ? row[durationIndex].toString().trim() : '';
+    const stopsStr = stopsIndex >= 0 && row[stopsIndex] ? row[stopsIndex].toString().trim() : '0';
+    const stopsMatch = stopsStr.match(/(\d+)/);
+    const stops = stopsMatch ? parseInt(stopsMatch[1]) : (stopsStr.toLowerCase().includes('non-stop') ? 0 : 0);
+    const departure = departureIndex >= 0 && row[departureIndex] ? row[departureIndex].toString().trim() : '';
+    const arrival = arrivalIndex >= 0 && row[arrivalIndex] ? row[arrivalIndex].toString().trim() : '';
+    const origin = originIndex >= 0 && row[originIndex] ? row[originIndex].toString().trim() : '';
+    const destination = destIndex >= 0 && row[destIndex] ? row[destIndex].toString().trim() : '';
+    
+    return {
+      id: `${isOutbound ? 'outbound' : 'return'}-flight-${tableIndex}-${rowIndex}`,
+      airline,
+      flightNumber: flightCode,
+      price,
+      currency: 'USD',
+      duration,
+      stops,
+      departure,
+      arrival,
+      origin,
+      destination,
+      type: isOutbound ? 'outbound' : 'return'
+    };
+  };
+  
   // Special rendering for Outbound Flights table with new design rules
   if (isFlightTable && isOutboundFlightsTable && rows.length > 1) {
     const headerRow = rows[0];
@@ -3660,13 +4279,14 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 <th style={{ padding: '12px', textAlign: 'right', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Arrival
                 </th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0', width: '90px' }}>
-                  Compare
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0', width: '180px' }}>
+                  Actions
                 </th>
               </tr>
             </thead>
             <tbody>
               {(() => {
+                const headerRow = rows[0];
                 // First, extract all prices to find the minimum
                 const allPrices = rows.slice(1).map(row => {
                   if (priceIndex >= 0 && row[priceIndex]) {
@@ -3871,39 +4491,119 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       {arrival}
                     </td>
                     
-                    {/* Compare */}
-                    <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top', width: '90px' }}>
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const event = new CustomEvent('compareFlight', {
-                            detail: { rowIndex: rowIndex + 1, tableIndex }
-                          });
-                          window.dispatchEvent(event);
-                        }}
-                        style={{
-                          padding: '6px 12px',
-                          fontSize: '12px',
-                          fontWeight: '500',
-                          color: '#00ADEF',
-                          backgroundColor: 'white',
-                          border: '1px solid #00ADEF',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          whiteSpace: 'nowrap',
-                          width: '90px'
-                        }}
-                        onMouseEnter={(e) => {
-                          e.target.style.backgroundColor = '#E6F7FF';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.target.style.backgroundColor = 'white';
-                        }}
-                      >
-                        Compare
-                      </button>
+                    {/* Compare and Add to Itinerary */}
+                    <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top', width: '180px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const event = new CustomEvent('compareFlight', {
+                              detail: { rowIndex: rowIndex + 1, tableIndex }
+                            });
+                            window.dispatchEvent(event);
+                          }}
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            fontWeight: '500',
+                            color: '#00ADEF',
+                            backgroundColor: 'white',
+                            border: '1px solid #00ADEF',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease',
+                            whiteSpace: 'nowrap',
+                            width: '100%'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.target.style.backgroundColor = '#E6F7FF';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.target.style.backgroundColor = 'white';
+                          }}
+                        >
+                          Compare
+                        </button>
+                        {(() => {
+                          const currentState = loadTripState();
+                          const flightId = `outbound-flight-${tableIndex}-${rowIndex}`;
+                          const isSelected = currentState?.selectedOutboundFlight?.id === flightId;
+                          
+                          return (
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                
+                                const flightObj = extractFlightData(row, headerRow, rowIndex, tableIndex, true);
+                                const updatedState = loadTripState();
+                                
+                                if (isSelected) {
+                                  // Deselect
+                                  saveTripState({
+                                    ...updatedState,
+                                    selectedOutboundFlight: null
+                                  });
+                                  e.target.textContent = 'Add to itinerary';
+                                  e.target.style.backgroundColor = 'transparent';
+                                  e.target.style.color = '#004C8C';
+                                  e.target.style.borderColor = '#004C8C';
+                                } else {
+                                  // Select
+                                  saveTripState({
+                                    ...updatedState,
+                                    selectedOutboundFlight: flightObj
+                                  });
+                                  recordTripSelection('flight', flightObj);
+                                  e.target.textContent = '✓ Added to itinerary';
+                                  e.target.style.backgroundColor = '#00ADEF';
+                                  e.target.style.color = '#ffffff';
+                                  e.target.style.borderColor = '#00ADEF';
+                                }
+                              }}
+                              style={{
+                                width: '100%',
+                                padding: '8px 12px',
+                                fontSize: '12px',
+                                fontWeight: '500',
+                                color: isSelected ? '#ffffff' : '#004C8C',
+                                backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+                                border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                whiteSpace: 'nowrap'
+                              }}
+                              onMouseEnter={(e) => {
+                                if (!isSelected) {
+                                  e.target.style.backgroundColor = '#004C8C';
+                                  e.target.style.color = '#ffffff';
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (!isSelected) {
+                                  e.target.style.backgroundColor = 'transparent';
+                                  e.target.style.color = '#004C8C';
+                                }
+                              }}
+                            >
+                              {isSelected ? (
+                                <>
+                                  <span>✓</span>
+                                  <span>Added to itinerary</span>
+                                </>
+                              ) : (
+                                <span>Add to itinerary</span>
+                              )}
+                            </button>
+                          );
+                        })()}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -4228,8 +4928,8 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                 <th style={{ padding: '12px', textAlign: 'right', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0' }}>
                   Arrival
                 </th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0', width: '90px' }}>
-                  Compare
+                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: '#004C8C', borderBottom: '2px solid #e2e8f0', width: '180px' }}>
+                  Actions
                 </th>
               </tr>
             </thead>
@@ -4439,39 +5139,119 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                         {arrival}
                       </td>
                       
-                      {/* Compare */}
-                      <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top', width: '90px' }}>
-                        <button
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const event = new CustomEvent('compareFlight', {
-                              detail: { rowIndex: rowIndex + 1, tableIndex }
-                            });
-                            window.dispatchEvent(event);
-                          }}
-                          style={{
-                            padding: '6px 12px',
-                            fontSize: '12px',
-                            fontWeight: '500',
-                            color: '#00ADEF',
-                            backgroundColor: 'white',
-                            border: '1px solid #00ADEF',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s ease',
-                            whiteSpace: 'nowrap',
-                            width: '90px'
-                          }}
-                          onMouseEnter={(e) => {
-                            e.target.style.backgroundColor = '#E6F7FF';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.target.style.backgroundColor = 'white';
-                          }}
-                        >
-                          Compare
-                        </button>
+                      {/* Compare and Add to Itinerary */}
+                      <td style={{ padding: '12px', textAlign: 'center', verticalAlign: 'top', width: '180px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const event = new CustomEvent('compareFlight', {
+                                detail: { rowIndex: rowIndex + 1, tableIndex }
+                              });
+                              window.dispatchEvent(event);
+                            }}
+                            style={{
+                              padding: '6px 12px',
+                              fontSize: '12px',
+                              fontWeight: '500',
+                              color: '#00ADEF',
+                              backgroundColor: 'white',
+                              border: '1px solid #00ADEF',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s ease',
+                              whiteSpace: 'nowrap',
+                              width: '100%'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.target.style.backgroundColor = '#E6F7FF';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.target.style.backgroundColor = 'white';
+                            }}
+                          >
+                            Compare
+                          </button>
+                          {(() => {
+                            const currentState = loadTripState();
+                            const flightId = `return-flight-${tableIndex}-${rowIndex}`;
+                            const isSelected = currentState?.selectedReturnFlight?.id === flightId;
+                            
+                            return (
+                              <button
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  
+                                  const flightObj = extractFlightData(row, headerRow, rowIndex, tableIndex, false);
+                                  const updatedState = loadTripState();
+                                  
+                                  if (isSelected) {
+                                    // Deselect
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedReturnFlight: null
+                                    });
+                                    e.target.textContent = 'Add to itinerary';
+                                    e.target.style.backgroundColor = 'transparent';
+                                    e.target.style.color = '#004C8C';
+                                    e.target.style.borderColor = '#004C8C';
+                                  } else {
+                                    // Select
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedReturnFlight: flightObj
+                                    });
+                                    recordTripSelection('flight', flightObj);
+                                    e.target.textContent = '✓ Added to itinerary';
+                                    e.target.style.backgroundColor = '#00ADEF';
+                                    e.target.style.color = '#ffffff';
+                                    e.target.style.borderColor = '#00ADEF';
+                                  }
+                                }}
+                                style={{
+                                  width: '100%',
+                                  padding: '8px 12px',
+                                  fontSize: '12px',
+                                  fontWeight: '500',
+                                  color: isSelected ? '#ffffff' : '#004C8C',
+                                  backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+                                  border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+                                  borderRadius: '6px',
+                                  cursor: 'pointer',
+                                  transition: 'all 0.2s ease',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '4px',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                onMouseEnter={(e) => {
+                                  if (!isSelected) {
+                                    e.target.style.backgroundColor = '#004C8C';
+                                    e.target.style.color = '#ffffff';
+                                  }
+                                }}
+                                onMouseLeave={(e) => {
+                                  if (!isSelected) {
+                                    e.target.style.backgroundColor = 'transparent';
+                                    e.target.style.color = '#004C8C';
+                                  }
+                                }}
+                              >
+                                {isSelected ? (
+                                  <>
+                                    <span>✓</span>
+                                    <span>Added to itinerary</span>
+                                  </>
+                                ) : (
+                                  <span>Add to itinerary</span>
+                                )}
+                              </button>
+                            );
+                          })()}
+                        </div>
                       </td>
                     </tr>
                 );
@@ -4574,39 +5354,136 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       textAlign: 'center',
                       borderRight: 'none',
                       verticalAlign: 'middle',
-                      width: '90px'
+                      width: '180px'
                     }}>
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          const event = new CustomEvent('compareFlight', {
-                            detail: { rowIndex, tableIndex }
-                          });
-                          window.dispatchEvent(event);
-                        }}
-                        style={{
-                          padding: '6px 12px',
-                          fontSize: '12px',
-                          fontWeight: '500',
-                          color: '#00ADEF',
-                          backgroundColor: 'white',
-                          border: '1px solid #00ADEF',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease',
-                          whiteSpace: 'nowrap',
-                          width: '90px'
-                        }}
-                        onMouseEnter={(e) => {
-                          e.target.style.backgroundColor = '#E6F7FF';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.target.style.backgroundColor = 'white';
-                        }}
-                      >
-                        Compare
-                      </button>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const event = new CustomEvent('compareFlight', {
+                              detail: { rowIndex, tableIndex }
+                            });
+                            window.dispatchEvent(event);
+                          }}
+                          style={{
+                            padding: '6px 12px',
+                            fontSize: '12px',
+                            fontWeight: '500',
+                            color: '#00ADEF',
+                            backgroundColor: 'white',
+                            border: '1px solid #00ADEF',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease',
+                            whiteSpace: 'nowrap',
+                            width: '100%'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.target.style.backgroundColor = '#E6F7FF';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.target.style.backgroundColor = 'white';
+                          }}
+                        >
+                          Compare
+                        </button>
+                        {(() => {
+                          const currentState = loadTripState();
+                          const isOutbound = !isReturnFlightsTable;
+                          const flightId = `${isOutbound ? 'outbound' : 'return'}-flight-${tableIndex}-${rowIndex}`;
+                          const isSelected = isOutbound 
+                            ? currentState?.selectedOutboundFlight?.id === flightId
+                            : currentState?.selectedReturnFlight?.id === flightId;
+                          
+                          return (
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                
+                                const flightObj = extractFlightData(row, rows[0], rowIndex, tableIndex, isOutbound);
+                                const updatedState = loadTripState();
+                                
+                                if (isSelected) {
+                                  // Deselect
+                                  if (isOutbound) {
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedOutboundFlight: null
+                                    });
+                                  } else {
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedReturnFlight: null
+                                    });
+                                  }
+                                  e.target.textContent = 'Add to itinerary';
+                                  e.target.style.backgroundColor = 'transparent';
+                                  e.target.style.color = '#004C8C';
+                                  e.target.style.borderColor = '#004C8C';
+                                } else {
+                                  // Select
+                                  if (isOutbound) {
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedOutboundFlight: flightObj
+                                    });
+                                  } else {
+                                    saveTripState({
+                                      ...updatedState,
+                                      selectedReturnFlight: flightObj
+                                    });
+                                  }
+                                  recordTripSelection('flight', flightObj);
+                                  e.target.textContent = '✓ Added to itinerary';
+                                  e.target.style.backgroundColor = '#00ADEF';
+                                  e.target.style.color = '#ffffff';
+                                  e.target.style.borderColor = '#00ADEF';
+                                }
+                              }}
+                              style={{
+                                width: '100%',
+                                padding: '8px 12px',
+                                fontSize: '12px',
+                                fontWeight: '500',
+                                color: isSelected ? '#ffffff' : '#004C8C',
+                                backgroundColor: isSelected ? '#00ADEF' : 'transparent',
+                                border: `2px solid ${isSelected ? '#00ADEF' : '#004C8C'}`,
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '4px',
+                                whiteSpace: 'nowrap'
+                              }}
+                              onMouseEnter={(e) => {
+                                if (!isSelected) {
+                                  e.target.style.backgroundColor = '#004C8C';
+                                  e.target.style.color = '#ffffff';
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (!isSelected) {
+                                  e.target.style.backgroundColor = 'transparent';
+                                  e.target.style.color = '#004C8C';
+                                }
+                              }}
+                            >
+                              {isSelected ? (
+                                <>
+                                  <span>✓</span>
+                                  <span>Added to itinerary</span>
+                                </>
+                              ) : (
+                                <span>Add to itinerary</span>
+                              )}
+                            </button>
+                          );
+                        })()}
+                      </div>
                     </td>
                   )}
                   {/* Add empty header cell for compare column */}
@@ -4618,9 +5495,9 @@ function renderTable(rows, tableIndex = 0, onGenerateItinerary = null, onSaveTri
                       fontWeight: '600',
                       color: '#004C8C',
                       verticalAlign: 'middle',
-                      width: '90px'
+                      width: '180px'
                     }}>
-                      Compare
+                      Actions
                     </td>
                   )}
                 </tr>
